@@ -91,37 +91,9 @@ static_assert(sizeof(fuse_ino_t) >= sizeof(uint64_t),
               "fuse_ino_t must be at least 64 bits");
 
 
-/* Forward declarations */
-struct Inode;
-static Inode& get_inode(fuse_ino_t ino);
-static void forget_one(fuse_ino_t ino, uint64_t n);
-
-// Uniquely identifies a file in the source directory tree. This could
-// be simplified to just ino_t since we require the source directory
-// not to contain any mountpoints. This hasn't been done yet in case
-// we need to reconsider this constraint (but relaxing this would have
-// the drawback that we can no longer re-use inode numbers, and thus
-// readdir() would need to do a full lookup() in order to report the
-// right inode number).
-typedef std::pair<ino_t, dev_t> SrcId;
-
-// Define a hash function for SrcId
-namespace std {
-    template<>
-    struct hash<SrcId> {
-        size_t operator()(const SrcId& id) const {
-            return hash<ino_t>{}(id.first) ^ hash<dev_t>{}(id.second);
-        }
-    };
-}
-
-// Maps files in the source directory tree to inodes
-typedef std::unordered_map<SrcId, Inode> InodeMap;
-
 struct Inode {
     int fd {-1};
     bool is_symlink {false};
-    dev_t src_dev {0};
     ino_t src_ino {0};
     uint64_t nlookup {0};
     std::mutex m;
@@ -139,6 +111,9 @@ struct Inode {
             close(fd);
     }
 };
+
+// Maps files in the source directory tree to inodes
+typedef std::map<ino_t, Inode> InodeMap;
 
 struct Fs {
     // Must be acquired *after* any Inode.m locks.
@@ -166,18 +141,18 @@ static Inode& get_inode(fuse_ino_t ino) {
     if (ino == FUSE_ROOT_ID)
         return fs.root;
 
-    Inode* inode = reinterpret_cast<Inode*>(ino);
-    if(inode->fd == -1) {
+    lock_guard<mutex> g_fs {fs.mutex};
+    auto iter = fs.inodes.find(ino);
+
+    if (iter == fs.inodes.end()) {
         cerr << "INTERNAL ERROR: Unknown inode " << ino << endl;
         abort();
     }
-    return *inode;
-}
-
-
-static int get_fs_fd(fuse_ino_t ino) {
-    int fd = get_inode(ino).fd;
-    return fd;
+    if (iter->second.fd == -1) {
+        cerr << "INTERNAL ERROR: Invalid inode " << ino << endl;
+        abort();
+    }
+    return iter->second;
 }
 
 
@@ -319,16 +294,16 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 }
 
 
-static int do_lookup(fuse_ino_t parent, const char *name,
+static int do_lookup(Inode& parent, const char *name,
                      fuse_entry_param *e) {
     if (fs.debug)
         cerr << "DEBUG: lookup(): name=" << name
-             << ", parent=" << parent << endl;
+             << ", parent=" << parent.src_ino << endl;
     memset(e, 0, sizeof(*e));
     e->attr_timeout = fs.timeout;
     e->entry_timeout = fs.timeout;
 
-    auto newfd = openat(get_fs_fd(parent), name, O_PATH | O_NOFOLLOW);
+    auto newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
     if (newfd == -1)
         return errno;
 
@@ -350,15 +325,14 @@ static int do_lookup(fuse_ino_t parent, const char *name,
         return EIO;
     }
 
-    SrcId id {e->attr.st_ino, e->attr.st_dev};
     unique_lock<mutex> fs_lock {fs.mutex};
     Inode* inode_p;
     try {
-        inode_p = &fs.inodes[id];
+        inode_p = &fs.inodes[e->attr.st_ino];
     } catch (std::bad_alloc&) {
         return ENOMEM;
     }
-    e->ino = reinterpret_cast<fuse_ino_t>(inode_p);
+    e->ino = e->attr.st_ino;
     Inode& inode {*inode_p};
 
     if(inode.fd != -1) { // found existing inode
@@ -376,7 +350,6 @@ static int do_lookup(fuse_ino_t parent, const char *name,
            point no other thread has access to the inode mutex */
         lock_guard<mutex> g {inode.m};
         inode.src_ino = e->attr.st_ino;
-        inode.src_dev = e->attr.st_dev;
         inode.is_symlink = S_ISLNK(e->attr.st_mode);
         inode.nlookup = 1;
         inode.fd = newfd;
@@ -393,7 +366,7 @@ static int do_lookup(fuse_ino_t parent, const char *name,
 
 static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     fuse_entry_param e {};
-    auto err = do_lookup(parent, name, &e);
+    auto err = do_lookup(get_inode(parent), name, &e);
     if (err == ENOENT) {
         e.attr_timeout = fs.timeout;
         e.entry_timeout = fs.timeout;
@@ -427,7 +400,7 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
         goto out;
 
     fuse_entry_param e;
-    saverr = do_lookup(parent, name, &e);
+    saverr = do_lookup(inode_p, name, &e);
     if (saverr)
         goto out;
 
@@ -495,7 +468,7 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
         fuse_reply_err(req, errno);
         return;
     }
-    e.ino = reinterpret_cast<fuse_ino_t>(&inode);
+    e.ino = ino;
     {
         lock_guard<mutex> g {inode.m};
         inode.nlookup++;
@@ -552,7 +525,7 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
         {
             lock_guard<mutex> g_fs {fs.mutex};
             l.unlock();
-            fs.inodes.erase({inode.src_ino, inode.src_dev});
+            fs.inodes.erase(inode.src_ino);
         }
     } else if (fs.debug)
             cerr << "DEBUG: forget: inode " << inode.src_ino
@@ -703,7 +676,7 @@ static void do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
         fuse_entry_param e{};
         size_t entsize;
         if(plus) {
-            err = do_lookup(ino, entry->d_name, &e);
+            err = do_lookup(inode, entry->d_name, &e);
             if (err)
                 goto error;
             entsize = fuse_add_direntry_plus(req, p, rem, entry->d_name, &e, entry->d_off);
@@ -794,7 +767,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 
     fi->fh = fd;
     fuse_entry_param e;
-    auto err = do_lookup(parent, name, &e);
+    auto err = do_lookup(inode_p, name, &e);
     if (err) {
         if (err == ENFILE || err == EMFILE)
             cerr << "ERROR: Reached maximum number of file descriptors." << endl;
@@ -926,7 +899,7 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
     struct statvfs stbuf;
 
-    auto res = fstatvfs(get_fs_fd(ino), &stbuf);
+    auto res = fstatvfs(get_inode(ino).fd, &stbuf);
     if (res == -1)
         fuse_reply_err(req, errno);
     else
