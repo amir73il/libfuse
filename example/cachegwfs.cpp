@@ -153,6 +153,15 @@ struct xfs_fh {
 		fh.handle_bytes = sizeof(fid);
 		fid.ino = fid.gen = 0;
 	}
+
+	xfs_fh(ino_t ino)
+	{
+		// Fake xfs file handle to get inode by ino without generation
+		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = XFS_FILEID_TYPE_64FLAG;
+		fid.ino = ino;
+		fid.gen = 0;
+	}
 };
 
 static Inode& get_inode(fuse_ino_t ino) {
@@ -321,7 +330,14 @@ static int do_lookup(Inode& parent, const char *name,
     e->attr_timeout = fs.timeout;
     e->entry_timeout = fs.timeout;
 
-    auto newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
+    int newfd;
+    if (parent.fd == -1) {
+        // open by fake XFS file handle
+        struct xfs_fh fake_xfs_fh{parent.src_ino};
+        newfd = open_by_handle_at(fs.root.fd, &fake_xfs_fh.fh, O_PATH);
+    } else {
+        newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
+    }
     if (newfd == -1)
         return errno;
 
@@ -402,7 +418,15 @@ static int do_lookup(Inode& parent, const char *name,
 
 static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     fuse_entry_param e {};
-    auto err = do_lookup(get_inode(parent), name, &e);
+    Inode inode {};
+    Inode *inode_p = &inode;
+    if (strcmp(name, ".") == 0) {
+        // request to open by FUSE file handle
+        inode.src_ino = parent;
+    } else {
+        inode_p = &get_inode(parent);
+    }
+    auto err = do_lookup(*inode_p, name, &e);
     if (err == ENOENT) {
         e.attr_timeout = fs.timeout;
         e.entry_timeout = fs.timeout;
@@ -1240,7 +1264,8 @@ int main(int argc, char *argv[]) {
         errx(1, "ERROR: source is not a directory");
     fs.src_dev = stat.st_dev;
 
-    fs.root.fd = open(fs.source.c_str(), O_PATH);
+    // Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
+    fs.root.fd = open(fs.source.c_str(), O_DIRECTORY|O_RDONLY);
     if (fs.root.fd == -1)
         err(1, "ERROR: open(\"%s\", O_PATH)", fs.source.c_str());
 
