@@ -137,6 +137,24 @@ static Fs fs{};
             static_cast<fuse_buf_copy_flags>(0))
 
 
+#define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
+#define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
+
+struct xfs_fid64 {
+	uint64_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct xfs_fh {
+	struct file_handle fh;
+	struct xfs_fid64 fid;
+
+	xfs_fh() {
+		fh.handle_bytes = sizeof(fid);
+		fid.ino = fid.gen = 0;
+	}
+};
+
 static Inode& get_inode(fuse_ino_t ino) {
     if (ino == FUSE_ROOT_ID)
         return fs.root;
@@ -316,12 +334,29 @@ static int do_lookup(Inode& parent, const char *name,
         return saveerr;
     }
 
+    int mount_id;
+    struct xfs_fh xfs_fh{};
+    res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+    if (res == -1) {
+        auto saveerr = errno;
+        close(newfd);
+        if (fs.debug)
+            cerr << "DEBUG: lookup(): name_to_handle_at failed" << endl;
+        return saveerr;
+    }
+
     if (e->attr.st_dev != fs.src_dev) {
         cerr << "WARNING: Mountpoints in the source directory tree will be hidden." << endl;
         return ENOTSUP;
     } else if (e->attr.st_ino == FUSE_ROOT_ID) {
         cerr << "ERROR: Source directory tree must not include inode "
              << FUSE_ROOT_ID << endl;
+        return EIO;
+    } else if (xfs_fh.fh.handle_type != XFS_FILEID_INO64_GEN) {
+        cerr << "WARNING: Source directory expected to be XFS." << endl;
+        return ENOTSUP;
+    } else if (e->attr.st_ino != xfs_fh.fid.ino) {
+        cerr << "ERROR: Source st_ino and file handle mismatch." << endl;
         return EIO;
     }
 
@@ -333,6 +368,7 @@ static int do_lookup(Inode& parent, const char *name,
         return ENOMEM;
     }
     e->ino = e->attr.st_ino;
+    e->generation = xfs_fh.fid.gen;
     Inode& inode {*inode_p};
 
     if(inode.fd != -1) { // found existing inode
