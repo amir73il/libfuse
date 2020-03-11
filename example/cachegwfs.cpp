@@ -368,6 +368,11 @@ static int do_lookup(Inode& parent, const char *name,
         cerr << "ERROR: Source directory tree must not include inode "
              << FUSE_ROOT_ID << endl;
         return EIO;
+    } else if (e->attr.st_ino == fs.root.src_ino) {
+        // found root when reconnecting directory file handle, i.e. lookup(ino, "..")
+        e->ino = FUSE_ROOT_ID;
+        close(newfd);
+        return 0;
     } else if (xfs_fh.fh.handle_type != XFS_FILEID_INO64_GEN) {
         cerr << "WARNING: Source directory expected to be XFS." << endl;
         return ENOTSUP;
@@ -387,7 +392,7 @@ static int do_lookup(Inode& parent, const char *name,
     e->generation = xfs_fh.fid.gen;
     Inode& inode {*inode_p};
 
-    if(inode.fd != -1) { // found existing inode
+    if (inode.fd != -1) { // found existing inode
         fs_lock.unlock();
         if (fs.debug)
             cerr << "DEBUG: lookup(): inode " << e->attr.st_ino
@@ -1265,6 +1270,7 @@ int main(int argc, char *argv[]) {
     fs.src_dev = stat.st_dev;
 
     // Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
+    fs.root.src_ino = stat.st_ino;
     fs.root.fd = open(fs.source.c_str(), O_DIRECTORY|O_RDONLY);
     if (fs.root.fd == -1)
         err(1, "ERROR: open(\"%s\", O_PATH)", fs.source.c_str());
