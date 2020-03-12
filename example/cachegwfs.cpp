@@ -92,7 +92,7 @@ static_assert(sizeof(fuse_ino_t) >= sizeof(uint64_t),
 
 
 struct Inode {
-    int fd {-1};
+    int _fd {-1}; // Long lived O_PATH fd
     bool is_symlink {false};
     ino_t src_ino {0};
     uint64_t nlookup {0};
@@ -107,8 +107,8 @@ struct Inode {
     Inode& operator=(const Inode&) = delete;
 
     ~Inode() {
-        if(fd > 0)
-            close(fd);
+        if (_fd > 0)
+            close(_fd);
     }
 };
 
@@ -164,6 +164,37 @@ struct xfs_fh {
 	}
 };
 
+// Short lived reference of inode to keep fd open
+struct InodeRef {
+	int fd {-1}; // Short lived O_PATH fd
+	const bool is_symlink;
+	const ino_t src_ino;
+	Inode& i;
+
+	// Delete copy constructor and assignments. We could implement
+	// move if we need it.
+	InodeRef() = delete;
+	InodeRef(const InodeRef&) = delete;
+	InodeRef(InodeRef&& inode) = delete;
+	InodeRef& operator=(InodeRef&& inode) = delete;
+	InodeRef& operator=(const InodeRef&) = delete;
+
+	InodeRef(Inode& inode) : i(inode),
+	is_symlink(inode.is_symlink), src_ino(inode.src_ino) {
+		fd = i._fd;
+		if (fd == -1) {
+			// TODO: open file by handle
+			cerr << "INTERNAL ERROR: no fd for inode " << src_ino << endl;
+			abort();
+		}
+	}
+
+	~InodeRef() {
+		if (fd > 0 && fd != i._fd)
+			close(fd);
+	}
+};
+
 static Inode& get_inode(fuse_ino_t ino) {
     if (ino == FUSE_ROOT_ID)
         return fs.root;
@@ -173,10 +204,6 @@ static Inode& get_inode(fuse_ino_t ino) {
 
     if (iter == fs.inodes.end()) {
         cerr << "INTERNAL ERROR: Unknown inode " << ino << endl;
-        abort();
-    }
-    if (iter->second.fd == -1) {
-        cerr << "INTERNAL ERROR: Invalid inode " << ino << endl;
         abort();
     }
     return iter->second;
@@ -206,7 +233,7 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 
 static void sfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     (void)fi;
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     struct stat attr;
     auto res = fstatat(inode.fd, "", &attr,
                        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
@@ -219,7 +246,7 @@ static void sfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 
 #ifdef HAVE_UTIMENSAT
-static int utimensat_empty_nofollow(Inode& inode,
+static int utimensat_empty_nofollow(InodeRef& inode,
                                     const struct timespec *tv) {
     if (inode.is_symlink) {
         /* Does not work on current kernels, but may in the future:
@@ -242,7 +269,7 @@ static int utimensat_empty_nofollow(Inode& inode,
 
 static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
                        int valid, struct fuse_file_info* fi) {
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     int ifd = inode.fd;
     int res;
 
@@ -321,7 +348,7 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 }
 
 
-static int do_lookup(Inode& parent, const char *name,
+static int do_lookup(InodeRef& parent, const char *name,
                      fuse_entry_param *e) {
     if (fs.debug)
         cerr << "DEBUG: lookup(): name=" << name
@@ -331,10 +358,10 @@ static int do_lookup(Inode& parent, const char *name,
     e->entry_timeout = fs.timeout;
 
     int newfd;
-    if (parent.fd == -1) {
+    if (parent.fd == 0) {
         // open by fake XFS file handle
         struct xfs_fh fake_xfs_fh{parent.src_ino};
-        newfd = open_by_handle_at(fs.root.fd, &fake_xfs_fh.fh, O_PATH);
+        newfd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
     } else {
         newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
     }
@@ -392,7 +419,7 @@ static int do_lookup(Inode& parent, const char *name,
     e->generation = xfs_fh.fid.gen;
     Inode& inode {*inode_p};
 
-    if (inode.fd != -1) { // found existing inode
+    if (inode._fd != -1) { // found existing inode
         fs_lock.unlock();
         if (fs.debug)
             cerr << "DEBUG: lookup(): inode " << e->attr.st_ino
@@ -409,7 +436,7 @@ static int do_lookup(Inode& parent, const char *name,
         inode.src_ino = e->attr.st_ino;
         inode.is_symlink = S_ISLNK(e->attr.st_mode);
         inode.nlookup = 1;
-        inode.fd = newfd;
+        inode._fd = newfd;
         fs_lock.unlock();
 
         if (fs.debug)
@@ -427,11 +454,13 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     Inode *inode_p = &inode;
     if (strcmp(name, ".") == 0) {
         // request to open by FUSE file handle
+        inode._fd = 0;
         inode.src_ino = parent;
     } else {
         inode_p = &get_inode(parent);
     }
-    auto err = do_lookup(*inode_p, name, &e);
+    InodeRef inode_ref(*inode_p);
+    auto err = do_lookup(inode_ref, name, &e);
     if (err == ENOENT) {
         e.attr_timeout = fs.timeout;
         e.entry_timeout = fs.timeout;
@@ -451,7 +480,7 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
                               const char *name, mode_t mode, dev_t rdev,
                               const char *link) {
     int res;
-    Inode& inode_p = get_inode(parent);
+    InodeRef inode_p(get_inode(parent));
     auto saverr = ENOMEM;
 
     if (S_ISDIR(mode))
@@ -497,7 +526,7 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int linkat_empty_nofollow(Inode& inode, int dfd, const char *name) {
+static int linkat_empty_nofollow(InodeRef& inode, int dfd, const char *name) {
     if (inode.is_symlink) {
         auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
         if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
@@ -515,8 +544,8 @@ static int linkat_empty_nofollow(Inode& inode, int dfd, const char *name) {
 
 static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
                      const char *name) {
-    Inode& inode = get_inode(ino);
-    Inode& inode_p = get_inode(parent);
+    InodeRef inode(get_inode(ino));
+    InodeRef inode_p(get_inode(parent));
     fuse_entry_param e {};
 
     e.attr_timeout = fs.timeout;
@@ -535,8 +564,8 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
     }
     e.ino = ino;
     {
-        lock_guard<mutex> g {inode.m};
-        inode.nlookup++;
+        lock_guard<mutex> g {inode.i.m};
+        inode.i.nlookup++;
     }
 
     fuse_reply_entry(req, &e);
@@ -545,8 +574,8 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 
 
 static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
-    Inode& inode_p = get_inode(parent);
-    lock_guard<mutex> g {inode_p.m};
+    InodeRef inode_p(get_inode(parent));
+    lock_guard<mutex> g {inode_p.i.m};
     auto res = unlinkat(inode_p.fd, name, AT_REMOVEDIR);
     fuse_reply_err(req, res == -1 ? errno : 0);
 }
@@ -555,8 +584,8 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
                        fuse_ino_t newparent, const char *newname,
                        unsigned int flags) {
-    Inode& inode_p = get_inode(parent);
-    Inode& inode_np = get_inode(newparent);
+    InodeRef inode_p(get_inode(parent));
+    InodeRef inode_np(get_inode(newparent));
     if (flags) {
         fuse_reply_err(req, EINVAL);
         return;
@@ -568,7 +597,7 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 
 static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
-    Inode& inode_p = get_inode(parent);
+    InodeRef inode_p(get_inode(parent));
     auto res = unlinkat(inode_p.fd, name, 0);
     fuse_reply_err(req, res == -1 ? errno : 0);
 }
@@ -612,7 +641,7 @@ static void sfs_forget_multi(fuse_req_t req, size_t count,
 
 
 static void sfs_readlink(fuse_req_t req, fuse_ino_t ino) {
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     char buf[PATH_MAX + 1];
     auto res = readlinkat(inode.fd, "", buf, sizeof(buf));
     if (res == -1)
@@ -647,7 +676,7 @@ static DirHandle *get_dir_handle(fuse_file_info *fi) {
 
 
 static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     auto d = new (nothrow) DirHandle;
     if (d == nullptr) {
         fuse_reply_err(req, ENOMEM);
@@ -657,7 +686,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     // Make Helgrind happy - it can't know that there's an implicit
     // synchronization due to the fact that other threads cannot
     // access d until we've called fuse_reply_*.
-    lock_guard<mutex> g {inode.m};
+    lock_guard<mutex> g {inode.i.m};
 
     auto fd = openat(inode.fd, ".", O_RDONLY);
     if (fd == -1)
@@ -697,8 +726,8 @@ static bool is_dot_or_dotdot(const char *name) {
 static void do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
                     off_t offset, fuse_file_info *fi, int plus) {
     auto d = get_dir_handle(fi);
-    Inode& inode = get_inode(ino);
-    lock_guard<mutex> g {inode.m};
+    InodeRef inode(get_inode(ino));
+    lock_guard<mutex> g {inode.i.m};
     char *p;
     auto rem = size;
     int err = 0, count = 0;
@@ -818,7 +847,7 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
                        mode_t mode, fuse_file_info *fi) {
-    Inode& inode_p = get_inode(parent);
+    InodeRef inode_p(get_inode(parent));
 
     auto fd = openat(inode_p.fd, name,
                      (fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
@@ -856,7 +885,7 @@ static void sfs_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 
 
 static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
 
     /* With writeback cache, kernel may send read requests even
        when userspace opened write-only */
@@ -964,7 +993,8 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
     struct statvfs stbuf;
 
-    auto res = fstatvfs(get_inode(ino).fd, &stbuf);
+    InodeRef inode(get_inode(ino));
+    auto res = fstatvfs(inode.fd, &stbuf);
     if (res == -1)
         fuse_reply_err(req, errno);
     else
@@ -998,7 +1028,7 @@ static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
                          size_t size) {
     char *value = nullptr;
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     ssize_t ret;
     int saverr;
 
@@ -1047,7 +1077,7 @@ out:
 
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
     char *value = nullptr;
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     ssize_t ret;
     int saverr;
 
@@ -1095,7 +1125,7 @@ out:
 
 static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
                          const char *value, size_t size, int flags) {
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     ssize_t ret;
     int saverr;
 
@@ -1118,7 +1148,7 @@ out:
 
 static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
     char procname[64];
-    Inode& inode = get_inode(ino);
+    InodeRef inode(get_inode(ino));
     ssize_t ret;
     int saverr;
 
@@ -1256,7 +1286,6 @@ int main(int argc, char *argv[]) {
     maximize_fd_limit();
 
     // Initialize filesystem root
-    fs.root.fd = -1;
     fs.root.nlookup = 9999;
     fs.root.is_symlink = false;
     fs.timeout = options.count("nocache") ? 0 : 86400.0;
@@ -1271,8 +1300,8 @@ int main(int argc, char *argv[]) {
 
     // Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
     fs.root.src_ino = stat.st_ino;
-    fs.root.fd = open(fs.source.c_str(), O_DIRECTORY|O_RDONLY);
-    if (fs.root.fd == -1)
+    fs.root._fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
+    if (fs.root._fd == -1)
         err(1, "ERROR: open(\"%s\", O_PATH)", fs.source.c_str());
 
     // Initialize fuse
