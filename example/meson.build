@@ -35,6 +35,9 @@ if not platform.endswith('bsd') and platform != 'dragonfly'
     executable('passthrough_hp', 'passthrough_hp.cc',
                dependencies: [ thread_dep, libfuse_dep ],
                install: false)
+    executable('cachegwfs', 'cachegwfs.cpp',
+               dependencies: [ thread_dep, libfuse_dep ],
+               install: true, install_dir: get_option('bindir'))
 endif
 
 # TODO: Link passthrough_fh with ulockmgr if available
