@@ -108,7 +108,7 @@ struct fd_guard {
 };
 
 struct Inode {
-    int _fd {-1}; // Long lived O_PATH fd
+    int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
     bool is_symlink {false};
     ino_t src_ino {0};
     uint64_t nlookup {0};
@@ -199,8 +199,12 @@ struct InodeRef {
 	is_symlink(inode.is_symlink), src_ino(inode.src_ino) {
 		fd = i._fd;
 		if (fd == -1) {
-			// TODO: open file by handle
-			cerr << "INTERNAL ERROR: no fd for inode " << src_ino << endl;
+			// open by fake XFS file handle
+			struct xfs_fh fake_xfs_fh{src_ino};
+			fd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+		}
+		if (fd == -1) {
+			cerr << "INTERNAL ERROR: failed to open fd for inode " << src_ino << endl;
 			abort();
 		}
 	}
@@ -433,7 +437,7 @@ static int do_lookup(InodeRef& parent, const char *name,
     e->generation = xfs_fh.fid.gen;
     Inode& inode {*inode_p};
 
-    if (inode._fd != -1) { // found existing inode
+    if (inode._fd != 0) { // found existing inode
         auto dead = !inode.src_ino;
         fs_lock.unlock();
         if (dead) {
@@ -443,7 +447,7 @@ static int do_lookup(InodeRef& parent, const char *name,
         }
         if (fs.debug)
             cerr << "DEBUG: lookup(): inode " << e->attr.st_ino
-                 << " (userspace) already known." << endl;
+                 << " (userspace) already known; fd = " << inode._fd << endl;
         lock_guard<mutex> g {inode.m};
         inode.nlookup++;
     } else { // no existing inode
@@ -455,13 +459,19 @@ static int do_lookup(InodeRef& parent, const char *name,
         inode.src_ino = e->attr.st_ino;
         inode.is_symlink = S_ISLNK(e->attr.st_mode);
         inode.nlookup = 1;
-        inode._fd = newfd;
-        newfd_g._fd = -1;
+        if (parent.src_ino == fs.root.src_ino && S_ISDIR(e->attr.st_mode)) {
+            // Hold long lived fd for subdirs of root
+            inode._fd = newfd;
+            newfd_g._fd = -1;
+        } else {
+            // Mark inode for open_by_handle
+            inode._fd = -1;
+        }
         fs_lock.unlock();
 
         if (fs.debug)
             cerr << "DEBUG: lookup(): created userspace inode " << e->attr.st_ino
-                 << endl;
+                 << "; fd = " << inode._fd << endl;
     }
 
     return 0;
