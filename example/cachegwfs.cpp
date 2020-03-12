@@ -91,6 +91,22 @@ static_assert(sizeof(fuse_ino_t) >= sizeof(uint64_t),
               "fuse_ino_t must be at least 64 bits");
 
 
+struct fd_guard {
+	int _fd {-1};
+
+	fd_guard() = delete;
+	fd_guard(const fd_guard&) = delete;
+	fd_guard(fd_guard&&) = delete;
+	fd_guard& operator=(fd_guard&&) = delete;
+	fd_guard& operator=(const fd_guard&) = delete;
+
+	fd_guard(int fd): _fd(fd) {}
+	~fd_guard() {
+		if (_fd > 0)
+			close(_fd);
+	}
+};
+
 struct Inode {
     int _fd {-1}; // Long lived O_PATH fd
     bool is_symlink {false};
@@ -368,10 +384,10 @@ static int do_lookup(InodeRef& parent, const char *name,
     if (newfd == -1)
         return errno;
 
+    fd_guard newfd_g(newfd);
     auto res = fstatat(newfd, "", &e->attr, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
     if (res == -1) {
         auto saveerr = errno;
-        close(newfd);
         if (fs.debug)
             cerr << "DEBUG: lookup(): fstatat failed" << endl;
         return saveerr;
@@ -382,7 +398,6 @@ static int do_lookup(InodeRef& parent, const char *name,
     res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
     if (res == -1) {
         auto saveerr = errno;
-        close(newfd);
         if (fs.debug)
             cerr << "DEBUG: lookup(): name_to_handle_at failed" << endl;
         return saveerr;
@@ -398,7 +413,6 @@ static int do_lookup(InodeRef& parent, const char *name,
     } else if (e->attr.st_ino == fs.root.src_ino) {
         // found root when reconnecting directory file handle, i.e. lookup(ino, "..")
         e->ino = FUSE_ROOT_ID;
-        close(newfd);
         return 0;
     } else if (xfs_fh.fh.handle_type != XFS_FILEID_INO64_GEN) {
         cerr << "WARNING: Source directory expected to be XFS." << endl;
@@ -420,13 +434,18 @@ static int do_lookup(InodeRef& parent, const char *name,
     Inode& inode {*inode_p};
 
     if (inode._fd != -1) { // found existing inode
+        auto dead = !inode.src_ino;
         fs_lock.unlock();
+        if (dead) {
+            cerr << "WARNING: lookup(): inode " << e->attr.st_ino
+                 << " raced with forget (try again)." << endl;
+            return ESTALE;
+        }
         if (fs.debug)
             cerr << "DEBUG: lookup(): inode " << e->attr.st_ino
                  << " (userspace) already known." << endl;
         lock_guard<mutex> g {inode.m};
         inode.nlookup++;
-        close(newfd);
     } else { // no existing inode
         /* This is just here to make Helgrind happy. It violates the
            lock ordering requirement (inode.m must be acquired before
@@ -437,6 +456,7 @@ static int do_lookup(InodeRef& parent, const char *name,
         inode.is_symlink = S_ISLNK(e->attr.st_mode);
         inode.nlookup = 1;
         inode._fd = newfd;
+        newfd_g._fd = -1;
         fs_lock.unlock();
 
         if (fs.debug)
@@ -618,12 +638,15 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
             cerr << "DEBUG: forget: cleaning up inode " << inode.src_ino << endl;
         {
             lock_guard<mutex> g_fs {fs.mutex};
+            // Mark dead inode to protect against racing with lookup
+            inode.src_ino = 0;
             l.unlock();
-            fs.inodes.erase(inode.src_ino);
+            fs.inodes.erase(ino);
         }
-    } else if (fs.debug)
+    } else if (fs.debug) {
             cerr << "DEBUG: forget: inode " << inode.src_ino
                  << " lookup count now " << inode.nlookup << endl;
+    }
 }
 
 static void sfs_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
