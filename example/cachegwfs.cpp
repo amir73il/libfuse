@@ -180,6 +180,26 @@ struct xfs_fh {
 	}
 };
 
+static int open_by_ino(ino_t ino)
+{
+	// open by fake XFS file handle
+	struct xfs_fh fake_xfs_fh{ino};
+
+	int fd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+	if (fd > 0 && fs.debug) {
+		char procname[64];
+		sprintf(procname, "/proc/self/fd/%i", fd);
+		char linkname[64];
+		int n = readlink(procname, linkname, 64);
+		if (n > 0) {
+			linkname[n] = 0;
+			cerr << "DEBUG: " << procname
+				<< " -> " << linkname << endl;
+		}
+	}
+	return fd;
+}
+
 // Short lived reference of inode to keep fd open
 struct InodeRef {
 	int fd {-1}; // Short lived O_PATH fd
@@ -199,9 +219,7 @@ struct InodeRef {
 	is_symlink(inode.is_symlink), src_ino(inode.src_ino) {
 		fd = i._fd;
 		if (fd == -1) {
-			// open by fake XFS file handle
-			struct xfs_fh fake_xfs_fh{src_ino};
-			fd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+			fd = open_by_ino(src_ino);
 		}
 		if (fd == -1) {
 			cerr << "INTERNAL ERROR: failed to open fd for inode " << src_ino << endl;
@@ -381,9 +399,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	int newfd;
 	if (parent.fd == 0) {
-		// open by fake XFS file handle
-		struct xfs_fh fake_xfs_fh{parent.src_ino};
-		newfd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+		newfd = open_by_ino(parent.src_ino);
 	} else {
 		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	}
