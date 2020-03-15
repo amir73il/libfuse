@@ -1076,6 +1076,27 @@ static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
 
 
 #ifdef HAVE_SETXATTR
+static int do_getxattr(InodeRef& inode, const char *name, char *value,
+		size_t size) {
+	/*
+	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
+	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
+	 */
+	int ret = fgetxattr(inode.fd, name, value, size);
+	if (ret >= 0)
+		return ret;
+
+	if (inode.is_symlink) {
+		/* Sorry, no race free way to getxattr on symlink. */
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	char procname[64];
+	sprintf(procname, "/proc/self/fd/%i", inode.fd);
+	return getxattr(procname, name, value, size);
+}
+
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 		size_t size) {
 	char *value = nullptr;
@@ -1083,15 +1104,6 @@ static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 	ssize_t ret;
 	int saverr;
 
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to getxattr on symlink. */
-		saverr = ENOTSUP;
-		goto out;
-	}
-
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-
 	if (size) {
 		value = new (nothrow) char[size];
 		if (value == nullptr) {
@@ -1099,7 +1111,7 @@ static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 			goto out;
 		}
 
-		ret = getxattr(procname, name, value, size);
+		ret = do_getxattr(inode, name, value, size);
 		if (ret == -1)
 			goto out_err;
 		saverr = 0;
@@ -1108,7 +1120,7 @@ static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 
 		fuse_reply_buf(req, value, ret);
 	} else {
-		ret = getxattr(procname, name, nullptr, 0);
+		ret = do_getxattr(inode, name, nullptr, 0);
 		if (ret == -1)
 			goto out_err;
 
@@ -1125,6 +1137,26 @@ out:
 	goto out_free;
 }
 
+
+static int do_listxattr(InodeRef& inode, char *value, size_t size) {
+	/*
+	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
+	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
+	 */
+	int ret = flistxattr(inode.fd, value, size);
+	if (ret >= 0)
+		return ret;
+
+	if (inode.is_symlink) {
+		/* Sorry, no race free way to listxattr on symlink. */
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	char procname[64];
+	sprintf(procname, "/proc/self/fd/%i", inode.fd);
+	return listxattr(procname, value, size);
+}
 
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
 	char *value = nullptr;
@@ -1132,15 +1164,6 @@ static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
 	ssize_t ret;
 	int saverr;
 
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to listxattr on symlink. */
-		saverr = ENOTSUP;
-		goto out;
-	}
-
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-
 	if (size) {
 		value = new (nothrow) char[size];
 		if (value == nullptr) {
@@ -1148,7 +1171,7 @@ static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
 			goto out;
 		}
 
-		ret = listxattr(procname, value, size);
+		ret = do_listxattr(inode, value, size);
 		if (ret == -1)
 			goto out_err;
 		saverr = 0;
@@ -1157,7 +1180,7 @@ static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
 
 		fuse_reply_buf(req, value, ret);
 	} else {
-		ret = listxattr(procname, nullptr, 0);
+		ret = do_listxattr(inode, nullptr, 0);
 		if (ret == -1)
 			goto out_err;
 
@@ -1174,22 +1197,34 @@ out:
 }
 
 
+static int do_setxattr(InodeRef& inode, const char *name,
+		const char *value, size_t size, int flags) {
+	/*
+	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
+	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
+	 */
+	int ret = fsetxattr(inode.fd, name, value, size, flags);
+	if (ret >= 0)
+		return ret;
+
+	if (inode.is_symlink) {
+		/* Sorry, no race free way to setxattr on symlink. */
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	char procname[64];
+	sprintf(procname, "/proc/self/fd/%i", inode.fd);
+	return setxattr(procname, name, value, size, flags);
+}
+
 static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 		const char *value, size_t size, int flags) {
 	InodeRef inode(get_inode(ino));
 	ssize_t ret;
 	int saverr;
 
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to setxattr on symlink. */
-		saverr = ENOTSUP;
-		goto out;
-	}
-
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-
-	ret = setxattr(procname, name, value, size, flags);
+	ret = do_setxattr(inode, name, value, size, flags);
 	saverr = ret == -1 ? errno : 0;
 
 out:
