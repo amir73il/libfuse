@@ -122,6 +122,12 @@ struct Inode {
 	Inode& operator=(Inode&& inode) = delete;
 	Inode& operator=(const Inode&) = delete;
 
+	void keepfd(fd_guard& newfd) {
+		// Upgrade short lived fd to long lived fd in inode cache
+		_fd = newfd._fd;
+		newfd._fd = -1;
+	}
+
 	~Inode() {
 		if (_fd > 0)
 			close(_fd);
@@ -467,6 +473,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 			cerr << "DEBUG: lookup(): inode " << e->attr.st_ino
 				<< " (userspace) already known; fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
+		// Maybe update long lived fd if opened initially by handle
+		if (inode._fd == -1 && parent.src_ino == fs.root.src_ino && S_ISDIR(e->attr.st_mode))
+			inode.keepfd(newfd_g);
 		inode.nlookup++;
 	} else { // no existing inode
 		/* This is just here to make Helgrind happy. It violates the
@@ -479,8 +488,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		inode.nlookup = 1;
 		if (parent.src_ino == fs.root.src_ino && S_ISDIR(e->attr.st_mode)) {
 			// Hold long lived fd for subdirs of root
-			inode._fd = newfd;
-			newfd_g._fd = -1;
+			inode.keepfd(newfd_g);
 		} else {
 			// Mark inode for open_by_handle
 			inode._fd = -1;
