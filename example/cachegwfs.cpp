@@ -760,7 +760,9 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	d->offset = 0;
 
 	fi->fh = reinterpret_cast<uint64_t>(d);
-	if(fs.timeout) {
+	if (fs.timeout) {
+		// TODO: implement "auto_cache" like logic and/or invalidate
+		// readdir cache on FAN_DIR_MODIFY
 		fi->keep_cache = 1;
 		fi->cache_readdir = 1;
 	}
@@ -975,6 +977,8 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		return;
 	}
 
+	// TODO: implement "auto_cache" logic and/or invalidate file data cache
+	// on FAN_MODIFY
 	fi->keep_cache = (fs.timeout != 0);
 	fi->fh = fd;
 	fuse_reply_open(req, fi);
@@ -1382,7 +1386,7 @@ int main(int argc, char *argv[]) {
 	// Initialize filesystem root
 	fs.root.nlookup = 9999;
 	fs.root.is_symlink = false;
-	fs.timeout = options.count("nocache") ? 0 : 86400.0;
+	fs.timeout = options.count("nocache") ? 0 : 1.0;
 
 	struct stat stat;
 	auto ret = lstat(fs.source.c_str(), &stat);
@@ -1402,7 +1406,7 @@ int main(int argc, char *argv[]) {
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
 			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "default_permissions,fsname=cachegw") ||
+			fuse_opt_add_arg(&args, "default_permissions,fsname=cachegw,subtype=cachegw") ||
 			(options.count("debug-fuse") && fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
