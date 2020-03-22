@@ -204,6 +204,12 @@ static std::string get_fd_path(int fd, bool data = false, bool rw = false)
 		cerr << "DEBUG: " << procname
 			<< " -> " << linkname << endl;
 	}
+	int prefix = fs.cache_root_dir.size();
+	if (data && n > prefix && !memcmp(fs.cache_root_dir.c_str(), linkname, prefix)) {
+		if (fs.debug)
+			cerr << "DEBUG: |=> " << linkname + prefix << endl;
+		return std::string(fs.source).append(linkname + prefix, n - prefix);
+	}
 	return std::string(procname);
 }
 
