@@ -190,23 +190,31 @@ struct xfs_fh {
 	}
 };
 
+// Convert fd to path for system calls that do not take an O_PATH fd
+// If @data is true, the opertaion needs to access data.
+// If @rw is true, the operation needs to modify data.
+static std::string get_fd_path(int fd, bool data = false, bool rw = false)
+{
+	char procname[64];
+	sprintf(procname, "/proc/self/fd/%i", fd);
+	char linkname[PATH_MAX];
+	int n = readlink(procname, linkname, PATH_MAX);
+	if (n > 0 && fs.debug) {
+		linkname[n] = 0;
+		cerr << "DEBUG: " << procname
+			<< " -> " << linkname << endl;
+	}
+	return std::string(procname);
+}
+
 static int open_by_ino(ino_t ino)
 {
 	// open by fake XFS file handle
 	struct xfs_fh fake_xfs_fh{ino};
 
 	int fd = open_by_handle_at(fs.mount_fd, &fake_xfs_fh.fh, O_PATH);
-	if (fd > 0 && fs.debug) {
-		char procname[64];
-		sprintf(procname, "/proc/self/fd/%i", fd);
-		char linkname[64];
-		int n = readlink(procname, linkname, 64);
-		if (n > 0) {
-			linkname[n] = 0;
-			cerr << "DEBUG: " << procname
-				<< " -> " << linkname << endl;
-		}
-	}
+	if (fd > 0 && fs.debug)
+		get_fd_path(fd);
 	return fd;
 }
 
@@ -309,10 +317,7 @@ static int utimensat_empty_nofollow(InodeRef& inode,
 		return res;
 	}
 
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-
-	return utimensat(AT_FDCWD, procname, tv, 0);
+	return utimensat(AT_FDCWD, get_fd_path(inode.fd).c_str(), tv, 0);
 }
 #endif
 
@@ -327,9 +332,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = fchmod(fi->fh, attr->st_mode);
 		} else {
-			char procname[64];
-			sprintf(procname, "/proc/self/fd/%i", ifd);
-			res = chmod(procname, attr->st_mode);
+			res = chmod(get_fd_path(ifd).c_str(), attr->st_mode);
 		}
 		if (res == -1)
 			goto out_err;
@@ -346,9 +349,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = ftruncate(fi->fh, attr->st_size);
 		} else {
-			char procname[64];
-			sprintf(procname, "/proc/self/fd/%i", ifd);
-			res = truncate(procname, attr->st_size);
+			res = truncate(get_fd_path(ifd, true, true).c_str(), attr->st_size);
 		}
 		if (res == -1)
 			goto out_err;
@@ -611,9 +612,7 @@ static int linkat_empty_nofollow(InodeRef& inode, int dfd, const char *name) {
 		return res;
 	}
 
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-	return linkat(AT_FDCWD, procname, dfd, name, AT_SYMLINK_FOLLOW);
+	return linkat(AT_FDCWD, get_fd_path(inode.fd).c_str(), dfd, name, AT_SYMLINK_FOLLOW);
 }
 
 
@@ -766,7 +765,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	// access d until we've called fuse_reply_*.
 	lock_guard<mutex> g {inode.i.m};
 
-	auto fd = openat(inode.fd, ".", O_RDONLY);
+	auto fd = open(get_fd_path(inode.fd, true).c_str(), O_RDONLY);
 	if (fd == -1)
 		goto out_errno;
 
@@ -985,9 +984,8 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
-	char buf[64];
-	sprintf(buf, "/proc/self/fd/%i", inode.fd);
-	auto fd = open(buf, fi->flags & ~O_NOFOLLOW);
+	std::string path = get_fd_path(inode.fd, true, (fi->flags & O_ACCMODE) != O_RDONLY);
+	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
 	if (fd == -1) {
 		auto err = errno;
 		if (err == ENFILE || err == EMFILE)
@@ -1123,9 +1121,7 @@ static int do_getxattr(InodeRef& inode, const char *name, char *value,
 		return -1;
 	}
 
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-	return getxattr(procname, name, value, size);
+	return getxattr(get_fd_path(inode.fd).c_str(), name, value, size);
 }
 
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -1184,9 +1180,7 @@ static int do_listxattr(InodeRef& inode, char *value, size_t size) {
 		return -1;
 	}
 
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-	return listxattr(procname, value, size);
+	return listxattr(get_fd_path(inode.fd).c_str(), value, size);
 }
 
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
@@ -1244,9 +1238,7 @@ static int do_setxattr(InodeRef& inode, const char *name,
 		return -1;
 	}
 
-	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-	return setxattr(procname, name, value, size, flags);
+	return setxattr(get_fd_path(inode.fd).c_str(), name, value, size, flags);
 }
 
 static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -1264,7 +1256,6 @@ out:
 
 
 static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
-	char procname[64];
 	InodeRef inode(get_inode(ino));
 	ssize_t ret;
 	int saverr;
@@ -1275,8 +1266,7 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 		goto out;
 	}
 
-	sprintf(procname, "/proc/self/fd/%i", inode.fd);
-	ret = removexattr(procname, name);
+	ret = removexattr(get_fd_path(inode.fd).c_str(), name);
 	saverr = ret == -1 ? errno : 0;
 
 out:
