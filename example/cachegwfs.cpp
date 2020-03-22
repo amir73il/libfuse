@@ -145,8 +145,12 @@ struct Fs {
 	double timeout;
 	bool debug;
 	std::string source;
+	std::string cache_root_dir;
 	size_t blocksize;
 	dev_t src_dev;
+	dev_t cache_dev;
+	ino_t cache_root_ino;
+	int mount_fd;
 	bool nosplice;
 	bool nocache;
 };
@@ -191,7 +195,7 @@ static int open_by_ino(ino_t ino)
 	// open by fake XFS file handle
 	struct xfs_fh fake_xfs_fh{ino};
 
-	int fd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+	int fd = open_by_handle_at(fs.mount_fd, &fake_xfs_fh.fh, O_PATH);
 	if (fd > 0 && fs.debug) {
 		char procname[64];
 		sprintf(procname, "/proc/self/fd/%i", fd);
@@ -421,9 +425,23 @@ static int do_lookup(InodeRef& parent, const char *name,
 		return saveerr;
 	}
 
+	/*
+	 * Source inode has same ino as cache ino, but only cache inode
+	 * encodes correct generation.
+	 */
+	int handlefd = newfd;
+	int cachefd = -1;
+	if (fs.cache_dev && e->attr.st_dev != fs.cache_dev) {
+		cachefd = open_by_ino(e->attr.st_ino);
+		if (cachefd == -1)
+			return errno;
+		handlefd = cachefd;
+	}
+	fd_guard cachefd_g(cachefd);
+
 	int mount_id;
 	struct xfs_fh xfs_fh{};
-	res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+	res = name_to_handle_at(handlefd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
 	if (res == -1) {
 		auto saveerr = errno;
 		if (fs.debug)
@@ -431,14 +449,14 @@ static int do_lookup(InodeRef& parent, const char *name,
 		return saveerr;
 	}
 
-	if (e->attr.st_dev != fs.src_dev) {
+	if (e->attr.st_dev != fs.src_dev && e->attr.st_dev != fs.cache_dev) {
 		cerr << "WARNING: Mountpoints in the source directory tree will be hidden." << endl;
 		return ENOTSUP;
 	} else if (e->attr.st_ino == FUSE_ROOT_ID) {
 		cerr << "ERROR: Source directory tree must not include inode "
 			<< FUSE_ROOT_ID << endl;
 		return EIO;
-	} else if (e->attr.st_ino == fs.root.src_ino) {
+	} else if (e->attr.st_ino == fs.root.src_ino || e->attr.st_ino == fs.cache_root_ino) {
 		// found root when reconnecting directory file handle, i.e. lookup(ino, "..")
 		e->ino = FUSE_ROOT_ID;
 		return 0;
@@ -446,7 +464,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 		cerr << "WARNING: Source directory expected to be XFS." << endl;
 		return ENOTSUP;
 	} else if (e->attr.st_ino != xfs_fh.fid.ino) {
-		cerr << "ERROR: Source st_ino and file handle mismatch." << endl;
+		cerr << "ERROR: Source st_ino " << e->attr.st_ino <<
+			" and file handle ino " << xfs_fh.fid.ino << " mismatch." << endl;
 		return EIO;
 	}
 
@@ -1308,7 +1327,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 
 static void print_usage(char *prog_name) {
 	cout << "Usage: " << prog_name << " --help\n"
-		<< "       " << prog_name << " [options] <source> <mountpoint>\n";
+		<< "       " << prog_name << " [options] <source> <mountpoint> [cache root dir]\n";
 }
 
 static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, char**& argv) {
@@ -1322,7 +1341,7 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 }
 
 
-static cxxopts::ParseResult parse_options(int argc, char **argv) {
+static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	cxxopts::Options opt_parser(argv[0]);
 	opt_parser.add_options()
 		("debug", "Enable filesystem debug messages")
@@ -1345,7 +1364,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
 			<< help.substr(help.find("\n\n") + 1, string::npos);
 		exit(0);
 
-	} else if (argc != 3) {
+	} else if (argc < 3) {
 		std::cout << argv[0] << ": invalid number of arguments\n";
 		print_usage(argv[0]);
 		exit(2);
@@ -1354,6 +1373,8 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
 	fs.debug = options.count("debug") != 0;
 	fs.nosplice = options.count("nosplice") != 0;
 	fs.source = std::string {realpath(argv[1], NULL)};
+	if (argc > 3)
+		fs.cache_root_dir = std::string {realpath(argv[3], NULL)};
 
 	return options;
 }
@@ -1395,12 +1416,37 @@ int main(int argc, char *argv[]) {
 	if (!S_ISDIR(stat.st_mode))
 		errx(1, "ERROR: source is not a directory");
 	fs.src_dev = stat.st_dev;
+	fs.root.src_ino = stat.st_ino;
+
+	fs.cache_dev = 0;
+	fs.cache_root_ino = 0;
+	fs.mount_fd = -1;
+	if (!fs.cache_root_dir.empty()) {
+		ret = lstat(fs.cache_root_dir.c_str(), &stat);
+		if (ret == -1)
+			err(1, "ERROR: failed to stat cache dir (\"%s\")", fs.cache_root_dir.c_str());
+		if (!S_ISDIR(stat.st_mode))
+			errx(1, "ERROR: cache dir is not a directory");
+		if (stat.st_dev != fs.src_dev) {
+			fs.cache_dev = stat.st_dev;
+			fs.cache_root_ino = stat.st_ino;
+		} else {
+			errx(1, "ERROR: cache dir on same dev as source dir");
+		}
+	}
 
 	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
-	fs.root.src_ino = stat.st_ino;
 	fs.root._fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
 	if (fs.root._fd == -1)
 		err(1, "ERROR: open(\"%s\", O_PATH)", fs.source.c_str());
+	if (fs.cache_dev) {
+		fs.mount_fd = open(fs.cache_root_dir.c_str(), O_DIRECTORY | O_RDONLY);
+		if (fs.mount_fd == -1)
+			err(1, "ERROR: open(\"%s\")", fs.cache_root_dir.c_str());
+
+	} else {
+		fs.mount_fd = fs.root._fd;
+	}
 
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
