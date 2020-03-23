@@ -146,6 +146,7 @@ struct Fs {
 	bool debug;
 	std::string source;
 	std::string cache_root_dir;
+	std::string stub_xattr;
 	size_t blocksize;
 	dev_t src_dev;
 	dev_t cache_dev;
@@ -190,6 +191,20 @@ struct xfs_fh {
 	}
 };
 
+// Check if this is an empty place holder (a.k.a stub file).
+// See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
+static bool is_stub_fd(int fd)
+{
+	if (fs.stub_xattr.empty())
+		return true;
+
+	/*
+	 * Requires kernel patch to pass O_PATH fd to getxattr:
+	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
+	 */
+	return fgetxattr(fd, fs.stub_xattr.c_str(), NULL, 0) > 0;
+}
+
 // Convert fd to path for system calls that do not take an O_PATH fd
 // If @data is true, the opertaion needs to access data.
 // If @rw is true, the operation needs to modify data.
@@ -198,16 +213,21 @@ static std::string get_fd_path(int fd, bool data = false, bool rw = false)
 	char procname[64];
 	sprintf(procname, "/proc/self/fd/%i", fd);
 	char linkname[PATH_MAX];
-	int n = readlink(procname, linkname, PATH_MAX);
+	int n = 0;
+	if (fs.debug || data) {
+		n = readlink(procname, linkname, PATH_MAX);
+	}
 	if (n > 0 && fs.debug) {
 		linkname[n] = 0;
 		cerr << "DEBUG: " << procname
 			<< " -> " << linkname << endl;
 	}
 	int prefix = fs.cache_root_dir.size();
-	if (data && n > prefix && !memcmp(fs.cache_root_dir.c_str(), linkname, prefix)) {
+	if (data && prefix && n > prefix &&
+	    !memcmp(fs.cache_root_dir.c_str(), linkname, prefix) && is_stub_fd(fd)) {
 		if (fs.debug)
-			cerr << "DEBUG: |=> " << linkname + prefix << endl;
+			cerr << "DEBUG: redirect " << (rw ? "write" : "read")
+			<< " |=> " << linkname + prefix << endl;
 		return std::string(fs.source).append(linkname + prefix, n - prefix);
 	}
 	return std::string(procname);
@@ -1323,7 +1343,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 
 static void print_usage(char *prog_name) {
 	cout << "Usage: " << prog_name << " --help\n"
-		<< "       " << prog_name << " [options] <source> <mountpoint> [cache root dir]\n";
+		<< "       " << prog_name << " [options] <source> <mountpoint> [<cache root dir> <stub xattr>]\n";
 }
 
 static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, char**& argv) {
@@ -1371,6 +1391,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.source = std::string {realpath(argv[1], NULL)};
 	if (argc > 3)
 		fs.cache_root_dir = std::string {realpath(argv[3], NULL)};
+	if (argc > 4)
+		fs.stub_xattr = std::string {argv[4]};
 
 	return options;
 }
