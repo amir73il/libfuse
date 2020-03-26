@@ -737,7 +737,7 @@ static void sfs_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
 
 static void sfs_forget_multi(fuse_req_t req, size_t count,
 		fuse_forget_data *forgets) {
-	for (int i = 0; i < count; i++)
+	for (unsigned i = 0; i < count; i++)
 		forget_one(forgets[i].ino, forgets[i].nlookup);
 	fuse_reply_none(req);
 }
@@ -1276,7 +1276,6 @@ static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 	ret = do_setxattr(inode, name, value, size, flags);
 	saverr = ret == -1 ? errno : 0;
 
-out:
 	fuse_reply_err(req, saverr);
 }
 
