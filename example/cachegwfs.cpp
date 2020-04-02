@@ -68,6 +68,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/fsuid.h>
+#include <signal.h>
 
 // C++ includes
 #include <cstddef>
@@ -159,6 +160,11 @@ struct Fs {
 		// Get own credentials
 		uid = geteuid();
 		gid = getegid();
+	}
+
+	// Reset to default runtime config values
+	void reset_config() {
+		debug = false;
 	}
 };
 static Fs fs{};
@@ -1429,7 +1435,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		exit(2);
 	}
 
-	fs.debug = options.count("debug") != 0;
+	if (options.count("debug"))
+		fs.debug = true;
 	fs.nosplice = options.count("nosplice") != 0;
 	fs.source = std::string {realpath(argv[1], NULL)};
 	if (argc > 3)
@@ -1440,6 +1447,41 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	return options;
 }
 
+#define CONFIG_FILE "/etc/cachegwfs.conf"
+
+static void read_config_file(int) {
+	std::ifstream cFile(CONFIG_FILE);
+	if (!cFile.is_open())
+		return;
+
+	// Reset to config defaults
+	fs.reset_config();
+
+	std::string line;
+	while (getline(cFile, line)) {
+		// Parse <name> = <value>
+		auto delimiterPos = line.find("=");
+		if (delimiterPos == string::npos)
+			continue;
+		auto name = line.substr(0, delimiterPos - 1);
+		auto value = line.substr(delimiterPos + 2);
+		std::cout << name << " = " << value << std::endl;
+		if (name == "debug")
+			fs.debug = std::stoi(value);
+	}
+}
+
+static void set_signal_handler()
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(struct sigaction));
+	sa.sa_handler = read_config_file;
+	sigemptyset(&(sa.sa_mask));
+
+	if (sigaction(SIGHUP, &sa, NULL) == -1)
+		warn("WARNING: sigaction() failed with");
+}
 
 static void maximize_fd_limit() {
 	struct rlimit lim {};
@@ -1456,6 +1498,11 @@ static void maximize_fd_limit() {
 
 
 int main(int argc, char *argv[]) {
+
+	// Read defaults from config file
+	read_config_file(0);
+	// Re-load config file on SIGHUP
+	set_signal_handler();
 
 	// Parse command line options
 	auto options {parse_options(argc, argv)};
