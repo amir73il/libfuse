@@ -67,6 +67,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/fsuid.h>
 
 // C++ includes
 #include <cstddef>
@@ -142,6 +143,8 @@ struct Fs {
 	std::mutex mutex;
 	InodeMap inodes; // protected by mutex
 	Inode root;
+	uid_t uid;
+	gid_t gid;
 	double timeout;
 	bool debug;
 	std::string source;
@@ -151,8 +154,44 @@ struct Fs {
 	dev_t src_dev;
 	bool nosplice;
 	bool nocache;
+
+	Fs() {
+		// Get own credentials
+		uid = geteuid();
+		gid = getegid();
+	}
 };
 static Fs fs{};
+
+#define NULL_UID static_cast<uid_t>(-1)
+#define NULL_GID static_cast<gid_t>(-1)
+
+struct Cred {
+	uid_t _uid {NULL_UID};
+	gid_t _gid {NULL_GID};
+
+	Cred() = delete;
+	Cred(const Cred&) = delete;
+	Cred(Cred&&) = delete;
+	Cred& operator=(Cred&&) = delete;
+	Cred& operator=(const Cred&) = delete;
+
+	Cred(fuse_req_t req) {
+		// Set requestor credentials
+		const struct fuse_ctx *ctx = fuse_req_ctx(req);
+
+		if (ctx->uid != fs.uid)
+			_uid = setfsuid(ctx->uid);
+		if (ctx->gid != fs.gid)
+			_gid = setfsgid(ctx->gid);
+	}
+	~Cred() {
+		if (_uid != NULL_UID)
+			setfsuid(_uid);
+		if (_gid != NULL_GID)
+			setfsgid(_gid);
+	}
+};
 
 
 #define FUSE_BUF_COPY_FLAGS			\
@@ -361,8 +400,8 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 			goto out_err;
 	}
 	if (valid & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
-		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : static_cast<uid_t>(-1);
-		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : static_cast<gid_t>(-1);
+		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : NULL_UID;
+		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : NULL_GID;
 
 		res = fchownat(ifd, "", uid, gid, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
 		if (res == -1)
@@ -561,6 +600,21 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 }
 
 
+static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
+	Cred cred(req);
+	return mkdirat(fd, name, mode);
+}
+
+static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name) {
+	Cred cred(req);
+	return symlinkat(link, fd, name);
+}
+
+static int do_mknod(fuse_req_t req, int fd, const char *name, mode_t mode, dev_t rdev) {
+	Cred cred(req);
+	return mknodat(fd, name, mode, rdev);
+}
+
 static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
 		const char *name, mode_t mode, dev_t rdev,
 		const char *link) {
@@ -569,11 +623,11 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
 	auto saverr = ENOMEM;
 
 	if (S_ISDIR(mode))
-		res = mkdirat(inode_p.fd, name, mode);
+		res = do_mkdir(req, inode_p.fd, name, mode);
 	else if (S_ISLNK(mode))
-		res = symlinkat(link, inode_p.fd, name);
+		res = do_symlink(req, link, inode_p.fd, name);
 	else
-		res = mknodat(inode_p.fd, name, mode, rdev);
+		res = do_mknod(req, inode_p.fd, name, mode, rdev);
 	saverr = errno;
 	if (res == -1)
 		goto out;
@@ -611,8 +665,9 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int linkat_empty_nofollow(InodeRef& inode, int dfd, const char *name) {
+static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const char *name) {
 	if (inode.is_symlink) {
+		Cred cred(req);
 		auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
 		if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
 			/* Sorry, no race free way to hard-link a symlink. */
@@ -621,7 +676,9 @@ static int linkat_empty_nofollow(InodeRef& inode, int dfd, const char *name) {
 		return res;
 	}
 
-	return linkat(AT_FDCWD, get_fd_path(inode.fd).c_str(), dfd, name, AT_SYMLINK_FOLLOW);
+	string path = get_fd_path(inode.fd);
+	Cred cred(req);
+	return linkat(AT_FDCWD, path.c_str(), dfd, name, AT_SYMLINK_FOLLOW);
 }
 
 
@@ -634,7 +691,7 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 	e.attr_timeout = fs.timeout;
 	e.entry_timeout = fs.timeout;
 
-	auto res = linkat_empty_nofollow(inode, inode_p.fd, name);
+	auto res = linkat_empty_nofollow(req, inode, inode_p.fd, name);
 	if (res == -1) {
 		fuse_reply_err(req, errno);
 		return;
@@ -933,12 +990,16 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 }
 
 
+static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode) {
+	Cred cred(req);
+	return openat(fd, name, (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+}
+
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		mode_t mode, fuse_file_info *fi) {
 	InodeRef inode_p(get_inode(parent));
 
-	auto fd = openat(inode_p.fd, name,
-			(fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
+	auto fd = do_create(req, inode_p.fd, name, fi->flags, mode);
 	if (fd == -1) {
 		auto err = errno;
 		if (err == ENFILE || err == EMFILE)
