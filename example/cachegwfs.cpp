@@ -80,6 +80,7 @@
 #include <fstream>
 #include <thread>
 #include <iomanip>
+#include <set>
 
 using namespace std;
 
@@ -139,10 +140,58 @@ struct Inode {
 // Maps files in the source directory tree to inodes
 typedef std::map<ino_t, Inode> InodeMap;
 
+enum op {
+	OP_OPEN_RO,
+	OP_OPEN_RW,
+	OP_STATFS,
+	OP_CREATE,
+	OP_LINK,
+	OP_SYMLINK,
+	OP_MKDIR,
+	OP_MKNOD,
+	OP_OTHER,
+};
+
+const std::map<enum op, const char *> op_names = {
+	{ OP_OPEN_RO, "open_ro" },
+	{ OP_OPEN_RW, "open_rw" },
+	{ OP_SYMLINK, "symlink" },
+	{ OP_STATFS, "statfs" },
+	{ OP_CREATE, "create" },
+	{ OP_MKDIR, "mkdir" },
+	{ OP_MKNOD, "mknod" },
+	{ OP_LINK, "link" },
+};
+
 // Redirect config that can be changed in runtime
 struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
+	std::set<enum op> ops; // fs operations to redirect
+
+	bool test_op(enum op op) {
+		return ops.count(op) > 0;
+	}
+	void set_op(enum op op) {
+		ops.insert(op);
+	}
+
+	const char *op_name(enum op op) {
+		auto iter = op_names.find(op);
+		if (iter == op_names.end())
+			return "";
+		return iter->second;
+	}
+	void set_op(const string &name) {
+		auto it = find_if(op_names.begin(), op_names.end(),
+				[name](decltype(*op_names.begin()) &p) {
+					return p.second == name;
+				});
+		if (it != op_names.end())
+			set_op(it->first);
+		else
+			cerr << "WARNING: unknown redirect operation " << name << endl;
+	}
 };
 
 struct Fs {
@@ -242,8 +291,16 @@ struct xfs_fh {
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool should_redirect_fd(int fd, bool rw)
+static bool should_redirect_fd(int fd, enum op op)
 {
+	bool rw;
+	if (op == OP_OPEN_RO)
+		rw = false;
+	else if (op == OP_OPEN_RW)
+		rw = true;
+	else
+		return true;
+
 	const string &redirect_xattr = rw ? fs.redirect.write_xattr : fs.redirect.read_xattr;
 	if (redirect_xattr.empty())
 		return true;
@@ -256,15 +313,16 @@ static bool should_redirect_fd(int fd, bool rw)
 }
 
 // Convert fd to path for system calls that do not take an O_PATH fd
-// If @data is true, the opertaion needs to access data.
-// If @rw is true, the operation needs to modify data.
-static std::string get_fd_path(int fd, bool data = false, bool rw = false)
+// If @op is in fs.redirect.ops, then operation should use redirect path.
+static std::string get_fd_path(int fd, enum op op = OP_OTHER)
 {
 	char procname[64];
 	sprintf(procname, "/proc/self/fd/%i", fd);
 	char linkname[PATH_MAX];
 	int n = 0;
-	if (fs.debug || data) {
+	bool redirect_op = fs.redirect.test_op(op);
+
+	if (fs.debug || redirect_op) {
 		n = readlink(procname, linkname, PATH_MAX);
 	}
 	if (n > 0 && fs.debug) {
@@ -273,11 +331,11 @@ static std::string get_fd_path(int fd, bool data = false, bool rw = false)
 			<< " -> " << linkname << endl;
 	}
 	int prefix = fs.source.size();
-	if (data && prefix && n > prefix &&
-	    !memcmp(fs.source.c_str(), linkname, prefix) && should_redirect_fd(fd, rw)) {
+	if (redirect_op && prefix && n >= prefix &&
+	    !memcmp(fs.source.c_str(), linkname, prefix) && should_redirect_fd(fd, op)) {
 		if (fs.debug)
-			cerr << "DEBUG: redirect " << (rw ? "write" : "read")
-			<< " |=> " << linkname + prefix << endl;
+			cerr << "DEBUG: redirect " << fs.redirect.op_name(op)
+				<< " |=> " << linkname + prefix << endl;
 		return std::string(fs.redirect_path).append(linkname + prefix, n - prefix);
 	}
 	return std::string(procname);
@@ -425,7 +483,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = ftruncate(fi->fh, attr->st_size);
 		} else {
-			res = truncate(get_fd_path(ifd, true, true).c_str(), attr->st_size);
+			res = truncate(get_fd_path(ifd, OP_OPEN_RW).c_str(), attr->st_size);
 		}
 		if (res == -1)
 			goto out_err;
@@ -615,18 +673,36 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
 
 static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
-	Cred cred(req);
-	return mkdirat(fd, name, mode);
+	if (fs.redirect.test_op(OP_MKDIR)) {
+		string path = get_fd_path(fd, OP_MKDIR) + "/" + name;
+		Cred cred(req);
+		return mkdir(path.c_str(), mode);
+	} else {
+		Cred cred(req);
+		return mkdirat(fd, name, mode);
+	}
 }
 
 static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name) {
-	Cred cred(req);
-	return symlinkat(link, fd, name);
+	if (fs.redirect.test_op(OP_SYMLINK)) {
+		string path = get_fd_path(fd, OP_SYMLINK) + "/" + name;
+		Cred cred(req);
+		return symlink(link, path.c_str());
+	} else {
+		Cred cred(req);
+		return symlinkat(link, fd, name);
+	}
 }
 
 static int do_mknod(fuse_req_t req, int fd, const char *name, mode_t mode, dev_t rdev) {
-	Cred cred(req);
-	return mknodat(fd, name, mode, rdev);
+	if (fs.redirect.test_op(OP_MKNOD)) {
+		string path = get_fd_path(fd, OP_MKNOD) + "/" + name;
+		Cred cred(req);
+		return mknod(path.c_str(), mode, rdev);
+	} else {
+		Cred cred(req);
+		return mknodat(fd, name, mode, rdev);
+	}
 }
 
 static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
@@ -681,6 +757,10 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 
 static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const char *name) {
 	if (inode.is_symlink) {
+		if (fs.redirect.test_op(OP_LINK)) {
+			errno = EOPNOTSUPP;
+			return -1;
+		}
 		Cred cred(req);
 		auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
 		if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
@@ -690,7 +770,7 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 		return res;
 	}
 
-	string path = get_fd_path(inode.fd);
+	string path = get_fd_path(inode.fd, OP_LINK);
 	Cred cred(req);
 	return linkat(AT_FDCWD, path.c_str(), dfd, name, AT_SYMLINK_FOLLOW);
 }
@@ -845,7 +925,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	// access d until we've called fuse_reply_*.
 	lock_guard<mutex> g {inode.i.m};
 
-	auto fd = open(get_fd_path(inode.fd, true).c_str(), O_RDONLY);
+	auto fd = open(get_fd_path(inode.fd, OP_OPEN_RO).c_str(), O_RDONLY);
 	if (fd == -1)
 		goto out_errno;
 
@@ -1005,8 +1085,14 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode) {
-	Cred cred(req);
-	return openat(fd, name, (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+	if (fs.redirect.test_op(OP_CREATE)) {
+		string path = get_fd_path(fd, OP_CREATE) + "/" + name;
+		Cred cred(req);
+		return open(path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+	} else {
+		Cred cred(req);
+		return openat(fd, name, (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+	}
 }
 
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
@@ -1068,7 +1154,8 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
-	std::string path = get_fd_path(inode.fd, true, (fi->flags & O_ACCMODE) != O_RDONLY);
+	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	std::string path = get_fd_path(inode.fd, op);
 	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
 	if (fd == -1) {
 		auto err = errno;
@@ -1154,11 +1241,20 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 }
 
 
+static int do_statfs(int fd, struct statvfs *stbuf) {
+	if (fs.redirect.test_op(OP_STATFS)) {
+		string path = get_fd_path(fd, OP_STATFS);
+		return statvfs(path.c_str(), stbuf);
+	} else {
+		return fstatvfs(fd, stbuf);
+	}
+}
+
 static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
 	struct statvfs stbuf;
 
 	InodeRef inode(get_inode(ino));
-	auto res = fstatvfs(inode.fd, &stbuf);
+	auto res = do_statfs(inode.fd, &stbuf);
 	if (res == -1)
 		fuse_reply_err(req, errno);
 	else
@@ -1499,12 +1595,17 @@ static void read_config_file(int) {
 			continue;
 
 		std::cout << name << " = " << value << std::endl;
-		if (name == "debug")
+		if (name == "debug") {
 			fs.debug = std::stoi(value);
-		else if (name == "redirect_read_xattr")
+		} else if (name == "redirect_read_xattr") {
 			fs.redirect.read_xattr = value;
-		else if (name == "redirect_write_xattr")
+			fs.redirect.set_op(OP_OPEN_RO);
+		} else if (name == "redirect_write_xattr") {
 			fs.redirect.write_xattr = value;
+			fs.redirect.set_op(OP_OPEN_RW);
+		} else if (name == "redirect_op") {
+			fs.redirect.set_op(value);
+		}
 	}
 }
 
