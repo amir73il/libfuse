@@ -1449,6 +1449,34 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 
 #define CONFIG_FILE "/etc/cachegwfs.conf"
 
+static bool parseConfigLine(const string &line, string &name, string &value)
+{
+	/* regex explained:
+	 * \s* Match 0+ whitespace chars
+	 * ( Capture group 1
+	 * [^\s=]+ Match any char except =,space using a negated character class
+	 * ) Close group
+	 * \s* Match 0+ whitespace chars
+	 * = Match literally
+	 * \s* Match 0+ whitespace chars
+	 * ( Capture group 2
+	 * [^\s#]+ Match any char except whitespace char or #
+	 * ) Close group
+	 * .* Anything including and after space or #
+	 */
+	static const std::regex rgx(R"(\s*([^\s=]+)\s*=\s*([^\s#]+).*)");
+	std::smatch matches;
+	std::regex_match(line, matches, rgx);
+
+	if (matches.size() < 2)
+		return false;
+
+	name = matches[1].str();
+	value = matches[2].str();
+
+	return true;
+}
+
 static void read_config_file(int) {
 	std::ifstream cFile(CONFIG_FILE);
 	if (!cFile.is_open())
@@ -1459,12 +1487,11 @@ static void read_config_file(int) {
 
 	std::string line;
 	while (getline(cFile, line)) {
-		// Parse <name> = <value>
-		auto delimiterPos = line.find("=");
-		if (delimiterPos == string::npos)
+		string name, value;
+
+		if (!parseConfigLine(line, name, value))
 			continue;
-		auto name = line.substr(0, delimiterPos - 1);
-		auto value = line.substr(delimiterPos + 2);
+
 		std::cout << name << " = " << value << std::endl;
 		if (name == "debug")
 			fs.debug = std::stoi(value);
