@@ -139,6 +139,12 @@ struct Inode {
 // Maps files in the source directory tree to inodes
 typedef std::map<ino_t, Inode> InodeMap;
 
+// Redirect config that can be changed in runtime
+struct Redirect {
+	std::string read_xattr;
+	std::string write_xattr;
+};
+
 struct Fs {
 	// Must be acquired *after* any Inode.m locks.
 	std::mutex mutex;
@@ -149,8 +155,8 @@ struct Fs {
 	double timeout;
 	bool debug;
 	std::string source;
-	std::string redirect;
-	std::string stub_xattr;
+	std::string redirect_path;
+	Redirect redirect;
 	size_t blocksize;
 	dev_t src_dev;
 	bool nosplice;
@@ -165,6 +171,7 @@ struct Fs {
 	// Reset to default runtime config values
 	void reset_config() {
 		debug = false;
+		redirect = Redirect();
 	}
 };
 static Fs fs{};
@@ -235,16 +242,17 @@ struct xfs_fh {
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool is_stub_fd(int fd)
+static bool should_redirect_fd(int fd, bool rw)
 {
-	if (fs.stub_xattr.empty())
+	const string &redirect_xattr = rw ? fs.redirect.write_xattr : fs.redirect.read_xattr;
+	if (redirect_xattr.empty())
 		return true;
 
 	/*
 	 * Requires kernel patch to pass O_PATH fd to getxattr:
 	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
 	 */
-	return fgetxattr(fd, fs.stub_xattr.c_str(), NULL, 0) > 0;
+	return fgetxattr(fd, redirect_xattr.c_str(), NULL, 0) > 0;
 }
 
 // Convert fd to path for system calls that do not take an O_PATH fd
@@ -266,11 +274,11 @@ static std::string get_fd_path(int fd, bool data = false, bool rw = false)
 	}
 	int prefix = fs.source.size();
 	if (data && prefix && n > prefix &&
-	    !memcmp(fs.source.c_str(), linkname, prefix) && is_stub_fd(fd)) {
+	    !memcmp(fs.source.c_str(), linkname, prefix) && should_redirect_fd(fd, rw)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << (rw ? "write" : "read")
 			<< " |=> " << linkname + prefix << endl;
-		return std::string(fs.redirect).append(linkname + prefix, n - prefix);
+		return std::string(fs.redirect_path).append(linkname + prefix, n - prefix);
 	}
 	return std::string(procname);
 }
@@ -1392,7 +1400,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 
 static void print_usage(char *prog_name) {
 	cout << "Usage: " << prog_name << " --help\n"
-		<< "       " << prog_name << " [options] <source> <mountpoint> [<redirect dir> <stub xattr>]\n";
+		<< "       " << prog_name << " [options] <source> <mountpoint> [<redirect path>]\n";
 }
 
 static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, char**& argv) {
@@ -1440,9 +1448,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.nosplice = options.count("nosplice") != 0;
 	fs.source = std::string {realpath(argv[1], NULL)};
 	if (argc > 3)
-		fs.redirect = std::string {realpath(argv[3], NULL)};
-	if (argc > 4)
-		fs.stub_xattr = std::string {argv[4]};
+		fs.redirect_path = std::string {realpath(argv[3], NULL)};
 
 	return options;
 }
@@ -1495,6 +1501,10 @@ static void read_config_file(int) {
 		std::cout << name << " = " << value << std::endl;
 		if (name == "debug")
 			fs.debug = std::stoi(value);
+		else if (name == "redirect_read_xattr")
+			fs.redirect.read_xattr = value;
+		else if (name == "redirect_write_xattr")
+			fs.redirect.write_xattr = value;
 	}
 }
 
