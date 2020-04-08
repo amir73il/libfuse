@@ -205,6 +205,7 @@ struct Fs {
 	bool debug;
 	std::string source;
 	std::string redirect_path;
+	std::string config_file;
 	Redirect redirect;
 	size_t blocksize;
 	dev_t src_dev;
@@ -1496,7 +1497,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 
 static void print_usage(char *prog_name) {
 	cout << "Usage: " << prog_name << " --help\n"
-		<< "       " << prog_name << " [options] <source> <mountpoint> [<redirect path>]\n";
+		<< "       " << prog_name << " [options] <source> <mountpoint> [<redirect path> [<conf file>]]\n";
 }
 
 static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, char**& argv) {
@@ -1509,6 +1510,8 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 	}
 }
 
+
+#define CONFIG_FILE "/etc/cachegwfs.conf"
 
 static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	cxxopts::Options opt_parser(argv[0]);
@@ -1546,10 +1549,10 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	if (argc > 3)
 		fs.redirect_path = std::string {realpath(argv[3], NULL)};
 
+	fs.config_file = std::string {argc > 4 ? argv[4] : CONFIG_FILE};
+
 	return options;
 }
-
-#define CONFIG_FILE "/etc/cachegwfs.conf"
 
 static bool parseConfigLine(const string &line, string &name, string &value)
 {
@@ -1580,7 +1583,7 @@ static bool parseConfigLine(const string &line, string &name, string &value)
 }
 
 static void read_config_file(int) {
-	std::ifstream cFile(CONFIG_FILE);
+	std::ifstream cFile(fs.config_file);
 	if (!cFile.is_open())
 		return;
 
@@ -1637,13 +1640,13 @@ static void maximize_fd_limit() {
 
 int main(int argc, char *argv[]) {
 
+	// Parse command line options
+	auto options {parse_options(argc, argv)};
+
 	// Read defaults from config file
 	read_config_file(0);
 	// Re-load config file on SIGHUP
 	set_signal_handler();
-
-	// Parse command line options
-	auto options {parse_options(argc, argv)};
 
 	// We need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
