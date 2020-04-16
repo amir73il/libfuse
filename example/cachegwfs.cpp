@@ -313,12 +313,17 @@ static bool should_redirect_fd(int fd, enum op op)
 	return fgetxattr(fd, redirect_xattr.c_str(), NULL, 0) > 0;
 }
 
-// Convert fd to path for system calls that do not take an O_PATH fd
-// If @op is in fs.redirect.ops, then operation should use redirect path.
-static std::string get_fd_path(int fd, enum op op = OP_OTHER)
+// Convert <dirfd+name> for system calls that take an O_PATH fd.
+// Returns dirfd and sets outpath to redirected path relative to dirfd.
+// There is no elevated refcount on returned dirfd.
+// @name may be empty, in which case non redirected @outpath is set to
+// /proc/self/fd/<dirfd> and AT_FDCWD is returned.
+// If @op is in fs.redirect.ops, then @outpath is set to redirected path
+// and AT_FDCWD is returned.
+int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 {
 	char procname[64];
-	sprintf(procname, "/proc/self/fd/%i", fd);
+	sprintf(procname, "/proc/self/fd/%i", dirfd);
 	char linkname[PATH_MAX];
 	int n = 0;
 	bool redirect_op = fs.redirect.test_op(op);
@@ -333,13 +338,35 @@ static std::string get_fd_path(int fd, enum op op = OP_OTHER)
 	}
 	int prefix = fs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
-	    !memcmp(fs.source.c_str(), linkname, prefix) && should_redirect_fd(fd, op)) {
+	    !memcmp(fs.source.c_str(), linkname, prefix) &&
+	    should_redirect_fd(dirfd, op)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << fs.redirect.op_name(op)
 				<< " |=> " << linkname + prefix << endl;
-		return std::string(fs.redirect_path).append(linkname + prefix, n - prefix);
+		outpath = fs.redirect_path;
+		outpath.append(linkname + prefix, n - prefix);
+		if (*name) {
+			outpath.append("/");
+			outpath.append(name);
+		}
+		return AT_FDCWD;
+	} else if (!*name) {
+		// No redirect - convert dirfd+"" to safe /proc/ path
+		outpath = procname;
+		return AT_FDCWD;
+	} else {
+		// No redirect - return the dirfd+name we got
+		outpath = name;
+		return dirfd;
 	}
-	return std::string(procname);
+}
+
+// Convert fd to path for system calls that do not take an O_PATH fd
+static string get_fd_path(int fd, enum op op = OP_OTHER)
+{
+	static string path;
+	(void)get_fd_path_at(fd, "", op, path);
+	return path;
 }
 
 static int open_by_ino(ino_t ino)
@@ -674,36 +701,24 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
 
 static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
-	if (fs.redirect.test_op(OP_MKDIR)) {
-		string path = get_fd_path(fd, OP_MKDIR) + "/" + name;
-		Cred cred(req);
-		return mkdir(path.c_str(), mode);
-	} else {
-		Cred cred(req);
-		return mkdirat(fd, name, mode);
-	}
+	string path;
+	int dirfd = get_fd_path_at(fd, name, OP_MKDIR, path);
+	Cred cred(req);
+	return mkdirat(dirfd, path.c_str(), mode);
 }
 
 static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name) {
-	if (fs.redirect.test_op(OP_SYMLINK)) {
-		string path = get_fd_path(fd, OP_SYMLINK) + "/" + name;
-		Cred cred(req);
-		return symlink(link, path.c_str());
-	} else {
-		Cred cred(req);
-		return symlinkat(link, fd, name);
-	}
+	string path;
+	int dirfd = get_fd_path_at(fd, name, OP_SYMLINK, path);
+	Cred cred(req);
+	return symlinkat(link, dirfd, path.c_str());
 }
 
 static int do_mknod(fuse_req_t req, int fd, const char *name, mode_t mode, dev_t rdev) {
-	if (fs.redirect.test_op(OP_MKNOD)) {
-		string path = get_fd_path(fd, OP_MKNOD) + "/" + name;
-		Cred cred(req);
-		return mknod(path.c_str(), mode, rdev);
-	} else {
-		Cred cred(req);
-		return mknodat(fd, name, mode, rdev);
-	}
+	string path;
+	int dirfd = get_fd_path_at(fd, name, OP_MKNOD, path);
+	Cred cred(req);
+	return mknodat(dirfd, path.c_str(), mode, rdev);
 }
 
 static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
@@ -926,7 +941,9 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	// access d until we've called fuse_reply_*.
 	lock_guard<mutex> g {inode.i.m};
 
-	auto fd = open(get_fd_path(inode.fd, OP_OPEN_RO).c_str(), O_RDONLY);
+	string path;
+	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPEN_RO, path);
+	auto fd = openat(dirfd, path.c_str(), O_RDONLY);
 	if (fd == -1)
 		goto out_errno;
 
@@ -1086,14 +1103,10 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode) {
-	if (fs.redirect.test_op(OP_CREATE)) {
-		string path = get_fd_path(fd, OP_CREATE) + "/" + name;
-		Cred cred(req);
-		return open(path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
-	} else {
-		Cred cred(req);
-		return openat(fd, name, (flags | O_CREAT) & ~O_NOFOLLOW, mode);
-	}
+	string path;
+	int dirfd = get_fd_path_at(fd, name, OP_MKNOD, path);
+	Cred cred(req);
+	return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
 }
 
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
