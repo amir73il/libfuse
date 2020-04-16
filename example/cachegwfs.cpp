@@ -571,9 +571,20 @@ static int do_lookup(InodeRef& parent, const char *name,
 	e->entry_timeout = fs.timeout;
 
 	int newfd;
-	if (parent.fd == 0) {
+	if (strcmp(name, ".") == 0) {
 		newfd = open_by_ino(parent.src_ino);
+	} else if (strcmp(name, "..") == 0) {
+		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	} else {
+		// Check if reading parent directory should be redirected
+		// and lookup child in redirect path before lookup in source path
+		// to trigger populate of place holder directory
+		string path;
+		int dirfd = get_fd_path_at(parent.fd, name, OP_OPEN_RO, path);
+		if (dirfd != parent.fd &&
+		    faccessat(dirfd, path.c_str(), F_OK, AT_SYMLINK_NOFOLLOW)) {
+			return errno;
+		}
 		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	}
 	if (newfd == -1)
