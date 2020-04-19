@@ -364,7 +364,7 @@ int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 // Convert fd to path for system calls that do not take an O_PATH fd
 static string get_fd_path(int fd, enum op op = OP_OTHER)
 {
-	static string path;
+	string path;
 	(void)get_fd_path_at(fd, "", op, path);
 	return path;
 }
