@@ -1115,7 +1115,7 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode) {
 	string path;
-	int dirfd = get_fd_path_at(fd, name, OP_MKNOD, path);
+	int dirfd = get_fd_path_at(fd, name, OP_CREATE, path);
 	Cred cred(req);
 	return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
 }
