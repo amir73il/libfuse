@@ -443,6 +443,11 @@ struct File {
 	File& operator=(const File&) = delete;
 
 	File(int fd, int dirfd) : _fd(fd), redirected(dirfd == AT_FDCWD) {
+		// cachegw manager takes an exclusive lock before making file a stub
+		if (!redirected && flock(fd, LOCK_SH | LOCK_NB) == -1) {
+			_fd = -errno;
+			cerr << "ERROR: file is locked for read/write access." << endl;
+		}
 		if (fs.debug)
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
 	}
@@ -1170,9 +1175,9 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	auto fh = new (nothrow) File(fd, dirfd);
-	if (fh == nullptr) {
+	if (fh == nullptr || fh->_fd < 0) {
 		close(fd);
-		fuse_reply_err(req, ENOMEM);
+		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
 		return;
 	}
 
@@ -1235,9 +1240,9 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	}
 
 	auto fh = new (nothrow) File(fd, dirfd);
-	if (fh == nullptr) {
+	if (fh == nullptr || fh->_fd < 0) {
 		close(fd);
-		fuse_reply_err(req, ENOMEM);
+		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
 		return;
 	}
 
