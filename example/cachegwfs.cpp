@@ -58,6 +58,7 @@
 #include <err.h>
 #include <errno.h>
 #include <ftw.h>
+#include <fcntl.h>
 #include <fuse_lowlevel.h>
 #include <inttypes.h>
 #include <string.h>
@@ -168,6 +169,7 @@ struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
 	std::set<enum op> ops; // fs operations to redirect
+	bool ioacct {true};
 
 	bool test_op(enum op op) {
 		return ops.count(op) > 0;
@@ -211,6 +213,7 @@ struct Fs {
 	dev_t src_dev;
 	bool nosplice;
 	bool nocache;
+	bool noxacct_kernel {true};
 
 	Fs() {
 		// Get own credentials
@@ -433,6 +436,33 @@ static Inode& get_inode(fuse_ino_t ino) {
 }
 
 
+#ifndef O_NOXACCT
+#define O_NOXACCT 0x20000000
+#endif
+
+// Try to exclude file from wchar/rchar io accounting.
+// Requires a kernel patch to support O_NOXACCT flag.
+// Without kernel patch O_NOXACCT flag will be ignored and masked out.
+static void file_set_noxacct(int fd) {
+	if (!fs.noxacct_kernel)
+		return;
+
+        int flags = fcntl(fd, F_GETFL, 0);
+	// fd could be bad (not open)
+	if (flags < 0)
+		return;
+
+        flags |= O_NOXACCT;
+        if (fcntl(fd, F_SETFL, flags) < 0)
+		return;
+
+	// F_SETFL does not fail with unknown flags, it masks them out,
+	// so if O_NOXACCT flag is masked once, do not try to set it again.
+	flags = fcntl(fd, F_GETFL, 0);
+	if (!(flags & O_NOXACCT))
+		fs.noxacct_kernel = false;
+}
+
 // The object that hangs off of fi->fh for an open FUSE file (non-dir)
 struct File {
 	int _fd {-1};
@@ -447,6 +477,10 @@ struct File {
 		if (!redirected && flock(fd, LOCK_SH | LOCK_NB) == -1) {
 			_fd = -errno;
 			cerr << "ERROR: file is locked for read/write access." << endl;
+		}
+		// Best effort - no io accounting on redirected io
+		if (redirected && !fs.redirect.ioacct) {
+			file_set_noxacct(fd);
 		}
 		if (fs.debug)
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
@@ -1690,6 +1724,8 @@ static void read_config_file(int) {
 			fs.redirect.set_op(OP_OPEN_RW);
 		} else if (name == "redirect_op") {
 			fs.redirect.set_op(value);
+		} else if (name == "redirect_ioacct") {
+			fs.redirect.ioacct = stoi(value);
 		}
 	}
 }
