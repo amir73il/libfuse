@@ -1022,14 +1022,18 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
 	}
 	inode.nlookup -= n;
 	if (!inode.nlookup) {
-		if (fs.debug)
-			cerr << "DEBUG: forget: cleaning up inode " << inode.src_ino << endl;
+		auto src_ino = inode.src_ino;
+		int ninodes;
 		{
 			lock_guard<mutex> g_fs {fs.mutex};
 			// Mark dead inode to protect against racing with lookup
 			inode.src_ino = 0;
 			fs.inodes.erase(ino);
+			ninodes = fs.inodes.size();
 		}
+		if (fs.debug)
+			cerr << "DEBUG: forget: cleaning up inode " << src_ino
+				<< " inode count is " << ninodes << endl;
 	} else if (fs.debug) {
 		cerr << "DEBUG: forget: inode " << inode.src_ino
 			<< " lookup count now " << inode.nlookup << endl;
