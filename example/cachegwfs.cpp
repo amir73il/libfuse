@@ -141,7 +141,8 @@ struct Inode {
 };
 
 // Maps files in the source directory tree to inodes
-typedef std::map<ino_t, Inode> InodeMap;
+typedef shared_ptr<Inode> InodePtr;
+typedef std::map<ino_t, InodePtr> InodeMap;
 
 enum op {
 	OP_OPEN_RO,
@@ -203,7 +204,7 @@ struct Fs {
 	// Must be acquired *after* any Inode.m locks.
 	std::mutex mutex;
 	InodeMap inodes; // protected by mutex
-	Inode root;
+	InodePtr root;
 	uid_t uid;
 	gid_t gid;
 	double timeout;
@@ -217,6 +218,8 @@ struct Fs {
 	bool nocache;
 
 	Fs() {
+		// Initialize a dead inode
+		inodes[0].reset(new Inode());
 		// Get own credentials
 		uid = geteuid();
 		gid = getegid();
@@ -404,7 +407,7 @@ static int open_by_ino(ino_t ino)
 	// open by fake XFS file handle
 	struct xfs_fh fake_xfs_fh{ino};
 
-	int fd = open_by_handle_at(fs.root._fd, &fake_xfs_fh.fh, O_PATH);
+	int fd = open_by_handle_at(fs.root->_fd, &fake_xfs_fh.fh, O_PATH);
 	if (fd > 0 && fs.debug)
 		get_fd_path(fd);
 	return fd;
@@ -415,7 +418,7 @@ struct InodeRef {
 	int fd {-1}; // Short lived O_PATH fd
 	const bool is_symlink;
 	const ino_t src_ino;
-	Inode& i;
+	InodePtr i;
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -425,12 +428,13 @@ struct InodeRef {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(Inode& inode) : i(inode),
-	is_symlink(inode.is_symlink), src_ino(inode.src_ino) {
-		if (i.dead())
+	InodeRef(InodePtr inode) : i(inode),
+		is_symlink(inode->is_symlink), src_ino(inode->src_ino)
+	{
+		if (i->dead())
 			return;
 
-		fd = i._fd;
+		fd = i->_fd;
 		if (fd == -1) {
 			fd = open_by_ino(src_ino);
 		}
@@ -443,7 +447,7 @@ struct InodeRef {
 	int error(fuse_req_t req) {
 		int err = 0;
 
-		if (i.dead())
+		if (i->dead())
 			err = ENOENT;
 		else if (fd < 0)
 			err = -fd;
@@ -455,12 +459,12 @@ struct InodeRef {
 	}
 
 	~InodeRef() {
-		if (fd > 0 && fd != i._fd)
+		if (fd > 0 && fd != i->_fd)
 			close(fd);
 	}
 };
 
-static Inode& get_inode(fuse_ino_t ino) {
+static InodePtr get_inode(fuse_ino_t ino) {
 	if (ino == FUSE_ROOT_ID)
 		return fs.root;
 
@@ -699,7 +703,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	}
 
 	auto src_ino = e->attr.st_ino;
-	auto root_ino = fs.root.src_ino;
+	auto root_ino = fs.root->src_ino;
 
 	if (e->attr.st_dev != fs.src_dev) {
 		cerr << "WARNING: Mountpoints in the source directory tree will be hidden." << endl;
@@ -731,13 +735,18 @@ static int do_lookup(InodeRef& parent, const char *name,
 #endif
 
 	unique_lock<mutex> fs_lock {fs.mutex};
-	Inode* inode_p;
-	try {
-		inode_p = &fs.inodes[src_ino];
+	auto iter = fs.inodes.find(src_ino);
+	bool found = (iter != fs.inodes.end());
+	InodePtr inode_ptr;
+
+	if (found) {
+		inode_ptr = iter->second;
+	} else try {
+		fs.inodes[src_ino].reset(new Inode());
+		inode_ptr = fs.inodes[src_ino];
 	} catch (std::bad_alloc&) {
 		return ENOMEM;
 	}
-	Inode& inode {*inode_p};
 
 #ifdef DEBUG_INTERNAL_ERROR_OPEN_BY_INO
 	// Fake lookup success by inserting a bad inode into map.
@@ -748,7 +757,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 	src_ino = FUSE_ROOT_ID;
 #endif
 
-	if (inode._fd != 0) { // found existing inode
+	// Use convenience reference to Inode
+	Inode &inode = *inode_ptr;
+	if (found) { // found existing inode
 		auto dead = inode.dead();
 		fs_lock.unlock();
 		if (dead) {
@@ -793,17 +804,22 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	fuse_entry_param e {};
-	Inode inode {};
-	Inode *inode_p = &inode;
+	InodePtr inode_p;
 	if (strcmp(name, ".") == 0) {
+		auto i = new (nothrow) Inode();
+		if (!i) {
+			fuse_reply_err(req, ENOMEM);
+			return;
+		}
+		inode_p.reset(i);
 		// request to open by FUSE file handle
-		inode._fd = 0;
-		inode.src_ino = parent;
+		inode_p->_fd = 0;
+		inode_p->src_ino = parent;
 	} else {
-		inode_p = &get_inode(parent);
+		inode_p = get_inode(parent);
 	}
 
-	InodeRef inode_ref(*inode_p);
+	InodeRef inode_ref(inode_p);
 	if (inode_ref.error(req))
 		return;
 
@@ -942,8 +958,8 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 	}
 	e.ino = ino;
 	{
-		lock_guard<mutex> g {inode.i.m};
-		inode.i.nlookup++;
+		lock_guard<mutex> g {inode.i->m};
+		inode.i->nlookup++;
 	}
 
 	fuse_reply_entry(req, &e);
@@ -956,7 +972,7 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	if (inode_p.error(req))
 		return;
 
-	lock_guard<mutex> g {inode_p.i.m};
+	lock_guard<mutex> g {inode_p.i->m};
 	auto res = unlinkat(inode_p.fd, name, AT_REMOVEDIR);
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
@@ -991,8 +1007,9 @@ static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
 
 static void forget_one(fuse_ino_t ino, uint64_t n) {
-	Inode& inode = get_inode(ino);
-	unique_lock<mutex> l {inode.m};
+	auto inode_ptr = get_inode(ino);
+	Inode &inode = *inode_ptr;
+	lock_guard<mutex> g {inode.m};
 
 	if (inode.dead())
 		return;
@@ -1011,7 +1028,6 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
 			lock_guard<mutex> g_fs {fs.mutex};
 			// Mark dead inode to protect against racing with lookup
 			inode.src_ino = 0;
-			l.unlock();
 			fs.inodes.erase(ino);
 		}
 	} else if (fs.debug) {
@@ -1086,7 +1102,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	// Make Helgrind happy - it can't know that there's an implicit
 	// synchronization due to the fact that other threads cannot
 	// access d until we've called fuse_reply_*.
-	lock_guard<mutex> g {inode.i.m};
+	lock_guard<mutex> g {inode.i->m};
 
 	string path;
 	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPEN_RO, path);
@@ -1134,7 +1150,7 @@ static void do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 		return;
 
 	auto d = get_dir_handle(fi);
-	lock_guard<mutex> g {inode.i.m};
+	lock_guard<mutex> g {inode.i->m};
 	char *p;
 	auto rem = size;
 	int err = 0, count = 0;
@@ -1870,8 +1886,9 @@ int main(int argc, char *argv[]) {
 	maximize_fd_limit();
 
 	// Initialize filesystem root
-	fs.root.nlookup = 9999;
-	fs.root.is_symlink = false;
+	fs.root.reset(new Inode());
+	fs.root->nlookup = 9999;
+	fs.root->is_symlink = false;
 	fs.timeout = options.count("nocache") ? 0 : 1.0;
 
 	struct stat stat;
@@ -1881,11 +1898,11 @@ int main(int argc, char *argv[]) {
 	if (!S_ISDIR(stat.st_mode))
 		errx(1, "ERROR: source is not a directory");
 	fs.src_dev = stat.st_dev;
-	fs.root.src_ino = stat.st_ino;
+	fs.root->src_ino = stat.st_ino;
 
 	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
-	fs.root._fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
-	if (fs.root._fd == -1)
+	fs.root->_fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
+	if (fs.root->_fd == -1)
 		err(1, "ERROR: open(\"%s\")", fs.source.c_str());
 
 	// Initialize fuse
