@@ -164,8 +164,9 @@ FUSE_3.4 {
 
 FUSE_3.7 {
 	global:
-		fuse_set_log_func;
 		fuse_log;
+		fuse_passthrough_enable;
+		fuse_set_log_func;
 } FUSE_3.4;
 
 # Local Variables:
