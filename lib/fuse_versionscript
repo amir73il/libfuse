@@ -157,6 +157,7 @@ FUSE_3.4 {
 	global:
 		fuse_fs_copy_file_range;
 		fuse_reply_copy_file_range;
+		fuse_passthrough_enable;
 } FUSE_3.3;
 
 # Local Variables:

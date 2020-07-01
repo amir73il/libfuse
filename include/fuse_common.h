@@ -90,6 +90,11 @@ struct fuse_file_info {
 	 * same file handle. */
 	uint64_t fh;
 
+	/** Passthrough file handle id.  May be filled in by filesystem in
+	 * create and open.  It is used to create a passthrough connection
+	 * between FUSE file and lower file system file. */
+	uint32_t passthrough_fh;
+
 	/** Lock owner id.  Available in locking operations and flush */
 	uint64_t lock_owner;
 
@@ -346,6 +351,41 @@ struct fuse_loop_config {
  * Setting (or unsetting) this flag in the `want` field has *no effect*.
  */
 #define FUSE_CAP_NO_OPENDIR_SUPPORT    (1 << 24)
+
+/**
+ * Indicates support for invalidating cached pages only on explicit request.
+ *
+ * If this flag is set in the `capable` field of the `fuse_conn_info` structure,
+ * then the FUSE kernel module supports invalidating cached pages only on
+ * explicit request by the filesystem through fuse_lowlevel_notify_inval_inode()
+ * or fuse_invalidate_path().
+ *
+ * By setting this flag in the `want` field of the `fuse_conn_info` structure,
+ * the filesystem is responsible for invalidating cached pages through explicit
+ * requests to the kernel.
+ *
+ * Note that setting this flag does not prevent the cached pages from being
+ * flushed by OS itself and/or through user actions.
+ *
+ * Note that if both FUSE_CAP_EXPLICIT_INVAL_DATA and FUSE_CAP_AUTO_INVAL_DATA
+ * are set in the `capable` field of the `fuse_conn_info` structure then
+ * FUSE_CAP_AUTO_INVAL_DATA takes precedence.
+ *
+ * This feature is disabled by default.
+ */
+/*#define FUSE_CAP_EXPLICIT_INVAL_DATA    (1 << 25)*/
+
+/**
+ * Indicates support for passthrough mode access for read/write operations.
+ *
+ * If this flag is set in the `capable` field of the `fuse_conn_info`
+ * structure, then the FUSE kernel module supports redirecting read/write
+ * operations to the lower file system instead of letting them to be handled
+ * by the FUSE daemon.
+ *
+ * This feature is disabled by default.
+ */
+#define FUSE_CAP_PASSTHROUGH            (1 << 29)
 
 /**
  * Ioctl flags

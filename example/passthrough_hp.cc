@@ -154,6 +154,7 @@ struct Fs {
     dev_t src_dev;
     bool nosplice;
     bool nocache;
+    bool passthrough;
 };
 static Fs fs{};
 
@@ -201,6 +202,8 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
         conn->want |= FUSE_CAP_SPLICE_WRITE;
     if (conn->capable & FUSE_CAP_SPLICE_READ && !fs.nosplice)
         conn->want |= FUSE_CAP_SPLICE_READ;
+    if (conn->capable & FUSE_CAP_PASSTHROUGH && fs.passthrough)
+        conn->want |= FUSE_CAP_PASSTHROUGH;
 }
 
 
@@ -839,6 +842,15 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
     Inode& inode = get_inode(e.ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen++;
+
+    if (fs.passthrough) {
+        int passthrough_fh = fuse_passthrough_enable(req, fd);
+        if (passthrough_fh > 0)
+            fi->passthrough_fh = passthrough_fh;
+        else if (fs.debug)
+            cerr << "DEBUG: fuse_passthrough_enable returned: " << passthrough_fh << endl;
+    }
+
     fuse_reply_create(req, &e, fi);
 }
 
@@ -892,6 +904,13 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     inode.nopen++;
     fi->keep_cache = (fs.timeout != 0);
     fi->fh = fd;
+    if (fs.passthrough) {
+        int passthrough_fh = fuse_passthrough_enable(req, fd);
+        if (passthrough_fh > 0)
+            fi->passthrough_fh = passthrough_fh;
+        else if (fs.debug)
+            cerr << "DEBUG: fuse_passthrough_enable returned: " << passthrough_fh << endl;
+    }
     fuse_reply_open(req, fi);
 }
 
@@ -1207,6 +1226,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
         ("help", "Print help")
         ("nocache", "Disable all caching")
         ("nosplice", "Do not use splice(2) to transfer data")
+        ("nopassthrough", "Do not use pass-through mode for read/write")
         ("single", "Run single-threaded");
 
     // FIXME: Find a better way to limit the try clause to just
@@ -1230,7 +1250,13 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
 
     fs.debug = options.count("debug") != 0;
     fs.nosplice = options.count("nosplice") != 0;
-    fs.source = std::string {realpath(argv[1], NULL)};
+    fs.passthrough = options.count("nopassthrough") == 0;
+
+    char* resolved_path = realpath(argv[1], NULL);
+    if (resolved_path == NULL)
+        warn("WARNING: realpath() failed with");
+    fs.source = std::string {resolved_path};
+    free(resolved_path);
 
     return options;
 }
@@ -1282,7 +1308,7 @@ int main(int argc, char *argv[]) {
     fuse_args args = FUSE_ARGS_INIT(0, nullptr);
     if (fuse_opt_add_arg(&args, argv[0]) ||
         fuse_opt_add_arg(&args, "-o") ||
-        fuse_opt_add_arg(&args, "default_permissions,fsname=hpps") ||
+        fuse_opt_add_arg(&args, "rw,nosuid,nodev,noatime,allow_other,fsname=hpps") ||
         (options.count("debug-fuse") && fuse_opt_add_arg(&args, "-odebug")))
         errx(3, "ERROR: Out of memory");
 
@@ -1300,7 +1326,7 @@ int main(int argc, char *argv[]) {
 
     // Mount and run main loop
     struct fuse_loop_config loop_config;
-    loop_config.clone_fd = 0;
+    loop_config.clone_fd = 1;
     loop_config.max_idle_threads = 10;
     if (fuse_session_mount(se, argv[2]) != 0)
         goto err_out3;
