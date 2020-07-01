@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 
 #ifndef F_LINUX_SPECIFIC_BASE
 #define F_LINUX_SPECIFIC_BASE       1024
@@ -395,6 +396,10 @@ static void fill_open(struct fuse_open_out *arg,
 		      const struct fuse_file_info *f)
 {
 	arg->fh = f->fh;
+	if (f->passthrough_fh) {
+		arg->passthrough_fh = f->passthrough_fh;
+		arg->open_flags |= FOPEN_PASSTHROUGH;
+	}
 	if (f->direct_io)
 		arg->open_flags |= FOPEN_DIRECT_IO;
 	if (f->keep_cache)
@@ -459,6 +464,16 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 {
 	return send_reply_ok(req, linkname, strlen(linkname));
+}
+
+int fuse_passthrough_enable(fuse_req_t req, unsigned int fd) {
+    int ret;
+
+    ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN, &fd);
+    if (ret <= 0)
+        fuse_log(FUSE_LOG_ERR, "fuse: passthrough_enable: %s\n", strerror(errno));
+
+    return ret;
 }
 
 int fuse_reply_open(fuse_req_t req, const struct fuse_file_info *f)
@@ -2016,6 +2031,8 @@ void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		}
 		if (arg->minor >= 38)
 			se->conn.capable |= FUSE_CAP_EXPIRE_ONLY;
+		if (inargflags & FUSE_PASSTHROUGH)
+			se->conn.capable |= FUSE_CAP_PASSTHROUGH;
 	} else {
 		se->conn.max_readahead = 0;
 	}
@@ -2144,6 +2161,8 @@ void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		outargflags |= FUSE_EXPLICIT_INVAL_DATA;
 	if (se->conn.want & FUSE_CAP_SETXATTR_EXT)
 		outargflags |= FUSE_SETXATTR_EXT;
+	if (se->conn.want & FUSE_CAP_PASSTHROUGH)
+		outargflags |= FUSE_PASSTHROUGH;
 
 	if (inargflags & FUSE_INIT_EXT) {
 		outargflags |= FUSE_INIT_EXT;

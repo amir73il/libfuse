@@ -105,6 +105,11 @@ struct fuse_file_info {
 	 * same file handle. */
 	uint64_t fh;
 
+	/** Passthrough file handle id.  May be filled in by filesystem in
+	 * create and open.  It is used to create a passthrough connection
+	 * between FUSE file and backing file. */
+	uint32_t passthrough_fh;
+
 	/** Lock owner id.  Available in locking operations and flush */
 	uint64_t lock_owner;
 
@@ -439,6 +444,18 @@ struct fuse_loop_config_v1 {
  * For example FUSE_SETXATTR_ACL_KILL_SGID might be set.
  */
 #define FUSE_CAP_SETXATTR_EXT     (1 << 27)
+
+/**
+ * Indicates support for passthrough mode access for read/write operations.
+ *
+ * If this flag is set in the `capable` field of the `fuse_conn_info`
+ * structure, then the FUSE kernel module supports redirecting read/write
+ * operations to the backing file instead of letting them to be handled
+ * by the FUSE daemon.
+ *
+ * This feature is disabled by default.
+ */
+#define FUSE_CAP_PASSTHROUGH      (1 << 28)
 
 /**
  * Ioctl flags
