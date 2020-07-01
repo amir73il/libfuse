@@ -158,6 +158,7 @@ struct Fs {
     size_t num_threads;
     bool clone_fd;
     std::string fuse_mount_options;
+    bool passthrough;
 };
 static Fs fs{};
 
@@ -211,6 +212,11 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
         if (conn->capable & FUSE_CAP_SPLICE_READ)
             conn->want |= FUSE_CAP_SPLICE_READ;
     }
+
+    if (conn->capable & FUSE_CAP_PASSTHROUGH && fs.passthrough)
+        conn->want |= FUSE_CAP_PASSTHROUGH;
+    else
+        fs.passthrough = false;
 }
 
 
@@ -829,12 +835,24 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
         if (err == ENFILE || err == EMFILE)
             cerr << "ERROR: Reached maximum number of file descriptors." << endl;
         fuse_reply_err(req, err);
-	return;
+        return;
     }
 
     Inode& inode = get_inode(e.ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen++;
+
+    if (fs.passthrough) {
+        fi->backing_id = fuse_passthrough_open(req, fd);
+        if (!fi->backing_id) {
+            cerr << "DEBUG: fuse_passthrough_open failed"
+                 << ", disabling rw passthrough." << endl;
+            fs.passthrough = false;
+        } else {
+            cerr << "DEBUG: fuse_passthrough_open " << fi->backing_id << endl;
+        }
+    }
+
     fuse_reply_create(req, &e, fi);
 }
 
@@ -889,6 +907,18 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     fi->keep_cache = (fs.timeout != 0);
     fi->noflush = (fs.timeout == 0 && (fi->flags & O_ACCMODE) == O_RDONLY);
     fi->fh = fd;
+
+    if (fs.passthrough) {
+        fi->backing_id = fuse_passthrough_open(req, fd);
+        if (!fi->backing_id) {
+            cerr << "DEBUG: fuse_passthrough_open failed"
+                 << ", disabling rw passthrough." << endl;
+            fs.passthrough = false;
+        } else {
+            cerr << "DEBUG: fuse_passthrough_open " << fi->backing_id << endl;
+        }
+    }
+
     fuse_reply_open(req, fi);
 }
 
@@ -935,6 +965,11 @@ static void do_read(fuse_req_t req, size_t size, off_t off, fuse_file_info *fi) 
 static void sfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                      fuse_file_info *fi) {
     (void) ino;
+    if (fs.passthrough) {
+        cerr << "ERROR: fuse_passthrough read failed." << endl;
+        fuse_reply_err(req, EIO);
+        return;
+    }
     do_read(req, size, off, fi);
 }
 
@@ -958,6 +993,11 @@ static void do_write_buf(fuse_req_t req, size_t size, off_t off,
 static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
                           off_t off, fuse_file_info *fi) {
     (void) ino;
+    if (fs.passthrough) {
+        cerr << "ERROR: fuse_passthrough write failed." << endl;
+        fuse_reply_err(req, EIO);
+        return;
+    }
     auto size {fuse_buf_size(in_buf)};
     do_write_buf(req, size, off, in_buf, fi);
 }
@@ -1207,6 +1247,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
         ("help", "Print help")
         ("nocache", "Disable all caching")
         ("nosplice", "Do not use splice(2) to transfer data")
+        ("nopassthrough", "Do not use pass-through mode for read/write")
         ("single", "Run single-threaded")
         ("o", "Mount options (see mount.fuse(5) - only use if you know what "
               "you are doing)", cxxopts::value(mount_options))
@@ -1214,7 +1255,6 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
                         cxxopts::value<int>()->default_value(SFS_DEFAULT_THREADS))
         ("clone-fd", "use separate fuse device fd for each thread",
                         cxxopts::value<bool>()->implicit_value(SFS_DEFAULT_CLONE_FD));
-
 
     // FIXME: Find a better way to limit the try clause to just
     // opt_parser.parse() (cf. https://github.com/jarro2783/cxxopts/issues/146)
@@ -1243,8 +1283,10 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
         fs.foreground = true;
 
     fs.nosplice = options.count("nosplice") != 0;
+    fs.passthrough = options.count("nopassthrough") == 0;
     fs.num_threads = options["num-threads"].as<int>();
     fs.clone_fd = options["clone-fd"].as<bool>();
+
     char* resolved_path = realpath(argv[1], NULL);
     if (resolved_path == NULL)
         warn("WARNING: realpath() failed with");
