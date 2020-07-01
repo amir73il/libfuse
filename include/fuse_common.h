@@ -96,14 +96,22 @@ struct fuse_file_info {
 	    on close. */
 	unsigned int noflush : 1;
 
+	/** Can be filled in by open, to request passthrough of read/write */
+	unsigned int passthrough : 1;
+
 	/** Padding.  Reserved for future use*/
-	unsigned int padding : 23;
+	unsigned int padding : 22;
 	unsigned int padding2 : 32;
 
 	/** File handle id.  May be filled in by filesystem in create,
 	 * open, and opendir().  Available in most other file operations on the
 	 * same file handle. */
 	uint64_t fh;
+
+	/** Passthrough file handle id.  May be filled in by filesystem in
+	 * create and open.  It is used to create a passthrough connection
+	 * between FUSE file and backing file. */
+	int32_t backing_id;
 
 	/** Lock owner id.  Available in locking operations and flush */
 	uint64_t lock_owner;
@@ -441,6 +449,18 @@ struct fuse_loop_config_v1 {
 #define FUSE_CAP_SETXATTR_EXT     (1 << 27)
 
 /**
+ * Indicates support for passthrough mode access for read/write operations.
+ *
+ * If this flag is set in the `capable` field of the `fuse_conn_info`
+ * structure, then the FUSE kernel module supports redirecting read/write
+ * operations to the backing file instead of letting them to be handled
+ * by the FUSE daemon.
+ *
+ * This feature is disabled by default.
+ */
+#define FUSE_CAP_PASSTHROUGH      (1 << 28)
+
+/**
  * Ioctl flags
  *
  * FUSE_IOCTL_COMPAT: 32bit compat ioctl on 64bit machine
@@ -570,9 +590,18 @@ struct fuse_conn_info {
 	unsigned time_gran;
 
 	/**
+	 * When FUSE_CAP_PASSTHROUGH is enabled, this is the maximum allowed
+	 * stacking depth of the backing files. The default is 0, meaning that
+	 * the backing files cannot be on a stacked filesystem.
+	 * Set this to > 0 if backing files are expected to be on a stacked
+	 * filesystem, such as overlatfs or another FUSE passthrough.
+	 */
+	unsigned max_backing_stack_depth;
+
+	/**
 	 * For future use.
 	 */
-	unsigned reserved[22];
+	unsigned reserved[21];
 };
 
 struct fuse_session;

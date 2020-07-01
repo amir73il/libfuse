@@ -207,6 +207,8 @@ def test_passthrough_hp(short_tmpdir, cache, debug, output_checker):
 
     if debug:
         cmdline.append('--debug')
+    else:
+        cmdline.append('--nopassthrough')
 
     mount_process = subprocess.Popen(cmdline, stdout=output_checker.fd,
                                      stderr=output_checker.fd)
