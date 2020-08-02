@@ -1140,6 +1140,8 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 out_errno:
 	auto error = errno;
 	delete d;
+	if (fd > 0)
+		close(fd);
 	if (error == ENFILE || error == EMFILE)
 		cerr << "ERROR: Reached maximum number of file descriptors." << endl;
 	fuse_reply_err(req, error);
@@ -1302,20 +1304,24 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 	auto fh = new (nothrow) File(fd, dirfd);
 	if (fh == nullptr || fh->_fd < 0) {
+		delete fh;
 		close(fd);
 		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
 		return;
 	}
 
-	fi->fh = reinterpret_cast<uint64_t>(fh);
 	fuse_entry_param e;
 	auto err = do_lookup(inode_p, name, &e);
 	if (err) {
+		delete fh;
 		if (err == ENFILE || err == EMFILE)
 			cerr << "ERROR: Reached maximum number of file descriptors." << endl;
 		fuse_reply_err(req, err);
-	} else
-		fuse_reply_create(req, &e, fi);
+		return;
+	}
+
+	fi->fh = reinterpret_cast<uint64_t>(fh);
+	fuse_reply_create(req, &e, fi);
 }
 
 
@@ -1369,6 +1375,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	auto fh = new (nothrow) File(fd, dirfd);
 	if (fh == nullptr || fh->_fd < 0) {
+		delete fh;
 		close(fd);
 		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
 		return;
@@ -1385,8 +1392,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	(void) ino;
 	auto fh = get_file_handle(fi);
-	if (fh != nullptr) // Should not be null, but better safe than sorry...
-		delete fh;
+	delete fh;
 	fuse_reply_err(req, 0);
 }
 
