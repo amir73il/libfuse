@@ -149,6 +149,8 @@ enum op {
 	OP_OPEN_RW,
 	OP_STATFS,
 	OP_CREATE,
+	OP_TRUNCATE,
+	OP_UTIMENS,
 	OP_LINK,
 	OP_SYMLINK,
 	OP_MKDIR,
@@ -162,6 +164,8 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CREATE, "create" },
+	{ OP_TRUNCATE, "truncate" },
+	{ OP_UTIMENS, "utimens" },
 	{ OP_MKDIR, "mkdir" },
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
@@ -569,7 +573,7 @@ static int utimensat_empty_nofollow(InodeRef& inode,
 		return res;
 	}
 
-	return utimensat(AT_FDCWD, get_fd_path(inode.fd).c_str(), tv, 0);
+	return utimensat(AT_FDCWD, get_fd_path(inode.fd, OP_UTIMENS).c_str(), tv, 0);
 }
 #endif
 
@@ -604,7 +608,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = ftruncate(get_file_fd(fi), attr->st_size);
 		} else {
-			res = truncate(get_fd_path(ifd, OP_OPEN_RW).c_str(), attr->st_size);
+			res = truncate(get_fd_path(ifd, OP_TRUNCATE).c_str(), attr->st_size);
 		}
 		if (res == -1)
 			goto out_err;
