@@ -222,6 +222,7 @@ struct Fs {
 	dev_t src_dev;
 	bool nosplice;
 	bool nocache;
+	bool wbcache;
 	bool noxacct_kernel {true};
 
 	Fs() {
@@ -559,7 +560,7 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 	if (conn->capable & FUSE_CAP_EXPORT_SUPPORT)
 		conn->want |= FUSE_CAP_EXPORT_SUPPORT;
 
-	if (fs.timeout && conn->capable & FUSE_CAP_WRITEBACK_CACHE)
+	if (fs.wbcache && conn->capable & FUSE_CAP_WRITEBACK_CACHE)
 		conn->want |= FUSE_CAP_WRITEBACK_CACHE;
 
 	if (conn->capable & FUSE_CAP_FLOCK_LOCKS)
@@ -1373,7 +1374,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	/* With writeback cache, kernel may send read requests even
 	   when userspace opened write-only */
-	if (fs.timeout && (fi->flags & O_ACCMODE) == O_WRONLY) {
+	if (fs.wbcache && (fi->flags & O_ACCMODE) == O_WRONLY) {
 		fi->flags &= ~O_ACCMODE;
 		fi->flags |= O_RDWR;
 	}
@@ -1384,7 +1385,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	   isn't accurate anymore). However, no process should modify the
 	   file in the underlying filesystem once it has been read, so
 	   this is not a problem. */
-	if (fs.timeout && fi->flags & O_APPEND)
+	if (fs.wbcache && fi->flags & O_APPEND)
 		fi->flags &= ~O_APPEND;
 
 	/* Unfortunately we cannot use inode.fd, because this was opened
@@ -1778,6 +1779,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("debug-fuse", "Enable libfuse debug messages")
 		("help", "Print help")
 		("nocache", "Disable all caching")
+		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
 		("single", "Run single-threaded");
 
@@ -1803,6 +1805,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	if (options.count("debug"))
 		fs.debug = true;
 	fs.nosplice = options.count("nosplice") != 0;
+	if (options.count("nocache") == 0)
+		fs.wbcache = options.count("wbcache") != 0;
 	fs.source = std::string {realpath(argv[1], NULL)};
 	if (argc > 3)
 		fs.redirect_path = std::string {realpath(argv[3], NULL)};
