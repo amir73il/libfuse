@@ -155,8 +155,11 @@ enum op {
 	OP_TRUNCATE,
 	OP_UTIMENS,
 	OP_LINK,
+	OP_RENAME,
+	OP_UNLINK,
 	OP_SYMLINK,
 	OP_MKDIR,
+	OP_RMDIR,
 	OP_MKNOD,
 	OP_OTHER,
 };
@@ -170,8 +173,11 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_TRUNCATE, "truncate" },
 	{ OP_UTIMENS, "utimens" },
 	{ OP_MKDIR, "mkdir" },
+	{ OP_RMDIR, "rmdir" },
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
+	{ OP_RENAME, "rename" },
+	{ OP_UNLINK, "unlink" },
 };
 static const char *op_name(enum op op) {
 	auto iter = op_names.find(op);
@@ -998,8 +1004,10 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 	}
 
 	string path = get_fd_path(inode.fd, OP_LINK);
+	string newpath;
+	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
 	Cred cred(req);
-	return linkat(AT_FDCWD, path.c_str(), dfd, name, AT_SYMLINK_FOLLOW);
+	return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
 }
 
 
@@ -1042,7 +1050,9 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 		return;
 
 	lock_guard<mutex> g {inode_p.i->m};
-	auto res = unlinkat(inode_p.fd, name, AT_REMOVEDIR);
+	string path;
+	int dirfd = get_fd_path_at(inode_p.fd, name, OP_RMDIR, path);
+	auto res = unlinkat(dirfd, path.c_str(), AT_REMOVEDIR);
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
@@ -1060,7 +1070,10 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 	}
 
-	auto res = renameat(inode_p.fd, name, inode_np.fd, newname);
+	string oldpath, newpath;
+	int olddirfd = get_fd_path_at(inode_p.fd, name, OP_RENAME, oldpath);
+	int newdirfd = get_fd_path_at(inode_np.fd, newname, OP_RENAME, newpath);
+	auto res = renameat(olddirfd, oldpath.c_str(), newdirfd, newpath.c_str());
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
@@ -1070,7 +1083,9 @@ static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	if (inode_p.error(req))
 		return;
 
-	auto res = unlinkat(inode_p.fd, name, 0);
+	string path;
+	int dirfd = get_fd_path_at(inode_p.fd, name, OP_UNLINK, path);
+	auto res = unlinkat(dirfd, path.c_str(), 0);
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
