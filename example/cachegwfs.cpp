@@ -324,7 +324,7 @@ struct xfs_fh {
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool should_redirect_fd(int fd, enum op op)
+static bool should_redirect_fd(const char *procname, enum op op)
 {
 	bool rw;
 	if (op == OP_OPEN_RO)
@@ -339,11 +339,7 @@ static bool should_redirect_fd(int fd, enum op op)
 	if (redirect_xattr.empty())
 		return true;
 
-	/*
-	 * Requires kernel patch to pass O_PATH fd to getxattr:
-	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
-	 */
-	return fgetxattr(fd, redirect_xattr.c_str(), NULL, 0) > 0;
+	return getxattr(procname, redirect_xattr.c_str(), NULL, 0) > 0;
 }
 
 // Convert <dirfd+name> for system calls that take an O_PATH fd.
@@ -377,7 +373,7 @@ int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 	int prefix = fs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
 	    !memcmp(fs.source.c_str(), linkname, prefix) &&
-	    should_redirect_fd(dirfd, op)) {
+	    should_redirect_fd(procname, op)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << op_name(op)
 				<< " |=> " << linkname + prefix << endl;
@@ -1515,20 +1511,6 @@ static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
 #ifdef HAVE_SETXATTR
 static int do_getxattr(InodeRef& inode, const char *name, char *value,
 		size_t size) {
-	/*
-	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
-	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
-	 */
-	int ret = fgetxattr(inode.fd, name, value, size);
-	if (ret >= 0)
-		return ret;
-
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to getxattr on symlink. */
-		errno = ENOTSUP;
-		return -1;
-	}
-
 	return getxattr(get_fd_path(inode.fd).c_str(), name, value, size);
 }
 
@@ -1577,20 +1559,6 @@ out:
 
 
 static int do_listxattr(InodeRef& inode, char *value, size_t size) {
-	/*
-	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
-	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
-	 */
-	int ret = flistxattr(inode.fd, value, size);
-	if (ret >= 0)
-		return ret;
-
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to listxattr on symlink. */
-		errno = ENOTSUP;
-		return -1;
-	}
-
 	return listxattr(get_fd_path(inode.fd).c_str(), value, size);
 }
 
@@ -1638,20 +1606,6 @@ out:
 
 static int do_setxattr(InodeRef& inode, const char *name,
 		const char *value, size_t size, int flags) {
-	/*
-	 * Requires kernel patch to use O_PATH to manage xattr on symlinks
-	 * https://lore.kernel.org/linux-fsdevel/20191128155940.17530-8-mszeredi@redhat.com/
-	 */
-	int ret = fsetxattr(inode.fd, name, value, size, flags);
-	if (ret >= 0)
-		return ret;
-
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to setxattr on symlink. */
-		errno = ENOTSUP;
-		return -1;
-	}
-
 	return setxattr(get_fd_path(inode.fd).c_str(), name, value, size, flags);
 }
 
