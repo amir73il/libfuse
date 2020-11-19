@@ -1821,9 +1821,22 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.nosplice = options.count("nosplice") != 0;
 	if (options.count("nocache") == 0)
 		fs.wbcache = options.count("wbcache") != 0;
-	fs.source = std::string {realpath(argv[1], NULL)};
-	if (argc > 3)
-		fs.redirect_path = std::string {realpath(argv[3], NULL)};
+	auto rp = realpath(argv[1], NULL);
+	if (!rp) {
+		cerr << "realpath(" << argv[1] << ") failed: " << strerror(errno) << endl;
+		exit(1);
+	}
+	cout << "source is " << rp << endl;
+	fs.source = rp;
+	if (argc > 3) {
+		rp = realpath(argv[3], NULL);
+		if (!rp) {
+			cerr << "realpath(" << argv[3] << ") failed: " << strerror(errno) << endl;
+			exit(1);
+		}
+		cout << "redirect is " << rp << endl;
+		fs.redirect_path = rp;
+	}
 
 	fs.config_file = std::string {argc > 4 ? argv[4] : CONFIG_FILE};
 
