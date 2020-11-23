@@ -70,6 +70,8 @@
 #include <pthread.h>
 #include <sys/fsuid.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <xfs/xfs.h>
 
 // C++ includes
 #include <cstddef>
@@ -116,6 +118,7 @@ struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	bool is_symlink {false};
 	ino_t src_ino {0};
+	uint32_t gen {0};
 	uint64_t nlookup {0};
 	std::mutex m;
 
@@ -315,13 +318,13 @@ struct xfs_fh {
 		fid.ino = fid.gen = 0;
 	}
 
-	xfs_fh(ino_t ino)
+	xfs_fh(ino_t ino, uint32_t gen)
 	{
-		// Fake xfs file handle to get inode by ino without generation
+		// Construct xfs file handle to get inode with or without generation
 		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = XFS_FILEID_TYPE_64FLAG;
+		fh.handle_type = gen ? XFS_FILEID_INO64_GEN : XFS_FILEID_TYPE_64FLAG;
 		fid.ino = ino;
-		fid.gen = 0;
+		fid.gen = gen;
 	}
 };
 
@@ -406,10 +409,34 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	return path;
 }
 
-static int open_by_ino(ino_t ino)
+static int open_by_ino(ino_t ino, uint32_t gen)
 {
-	// open by fake XFS file handle
-	struct xfs_fh fake_xfs_fh{ino};
+	__u64 ival = ino;
+	__s32 count = 0;
+	struct xfs_bstat bstat;
+	struct xfs_fsop_bulkreq breq = {
+		.lastip = &ival,
+		.icount = 1,
+		.ubuffer = (void *)&bstat,
+		.ocount = &count,
+	};
+
+	if (gen && !fs.debug) {
+		// Use then gen we know from lookup
+		// TODO: test if open by fake file handle supported by kernel
+		//       on startup and skip the bulkstat if it does
+	} else if (ioctl(fs.root->_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq)) {
+		cerr << "INTERNAL ERROR: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		if (!gen)
+			return -1;
+	} else {
+		cerr << "DEBUG: open_by_ino(): ino=" << ino << ", gen=" << gen << ", count=" << count
+			<< ", bs_ino=" << bstat.bs_ino  << ", bs_gen=" << bstat.bs_gen <<  endl;
+		gen = bstat.bs_gen;
+	}
+
+	// open by real or fake XFS file handle
+	struct xfs_fh fake_xfs_fh{ino, gen};
 
 	int fd = open_by_handle_at(fs.root->_fd, &fake_xfs_fh.fh, O_PATH);
 	if (fd > 0 && fs.debug)
@@ -440,7 +467,7 @@ struct InodeRef {
 
 		fd = i->_fd;
 		if (fd == -1) {
-			fd = open_by_ino(src_ino);
+			fd = open_by_ino(src_ino, inode->gen);
 		}
 		if (fd == -1) {
 			fd = -errno;
@@ -708,7 +735,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	int newfd;
 	if (strcmp(name, ".") == 0) {
-		newfd = open_by_ino(parent.src_ino);
+		newfd = open_by_ino(parent.src_ino, 0);
 	} else if (strcmp(name, "..") == 0) {
 		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	} else {
@@ -779,7 +806,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	unique_lock<mutex> fs_lock {fs.mutex};
 	auto iter = fs.inodes.find(src_ino);
-	bool found = (iter != fs.inodes.end());
+	bool found = (iter != fs.inodes.end() && iter->second->gen == xfs_fh.fid.gen);
 	InodePtr inode_ptr;
 
 	if (found) {
@@ -825,6 +852,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		   point no other thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
 		inode.src_ino = src_ino;
+		inode.gen = xfs_fh.fid.gen;
 		inode.is_symlink = S_ISLNK(e->attr.st_mode);
 		inode.nlookup = 1;
 		if (parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode)) {
