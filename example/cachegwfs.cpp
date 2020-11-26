@@ -152,6 +152,8 @@ enum op {
 	OP_OPEN_RW,
 	OP_STATFS,
 	OP_CREATE,
+	OP_CHMOD,
+	OP_CHOWN,
 	OP_TRUNCATE,
 	OP_UTIMENS,
 	OP_LINK,
@@ -170,6 +172,8 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CREATE, "create" },
+	{ OP_CHMOD, "chmod" },
+	{ OP_CHOWN, "chown" },
 	{ OP_TRUNCATE, "truncate" },
 	{ OP_UTIMENS, "utimens" },
 	{ OP_MKDIR, "mkdir" },
@@ -655,7 +659,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = fchmod(get_file_fd(fi), attr->st_mode);
 		} else {
-			res = chmod(get_fd_path(ifd).c_str(), attr->st_mode);
+			res = chmod(get_fd_path(ifd, OP_CHMOD).c_str(), attr->st_mode);
 		}
 		if (res == -1)
 			goto out_err;
@@ -664,7 +668,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : NULL_UID;
 		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : NULL_GID;
 
-		res = fchownat(ifd, "", uid, gid, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
+		res = fchownat(AT_FDCWD, get_fd_path(ifd, OP_CHOWN).c_str(), uid, gid, AT_SYMLINK_NOFOLLOW);
 		if (res == -1)
 			goto out_err;
 	}
