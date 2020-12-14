@@ -148,6 +148,7 @@ typedef shared_ptr<Inode> InodePtr;
 typedef std::map<ino_t, InodePtr> InodeMap;
 
 enum op {
+	OP_REDIRECT, // Force redirect
 	OP_OPEN_RO,
 	OP_OPEN_RW,
 	OP_STATFS,
@@ -163,6 +164,8 @@ enum op {
 	OP_MKDIR,
 	OP_RMDIR,
 	OP_MKNOD,
+	OP_GETXATTR,
+	OP_SETXATTR,
 	OP_OTHER,
 };
 
@@ -182,6 +185,8 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_LINK, "link" },
 	{ OP_RENAME, "rename" },
 	{ OP_UNLINK, "unlink" },
+	{ OP_GETXATTR, "getxattr" },
+	{ OP_SETXATTR, "setxattr" },
 };
 static const char *op_name(enum op op) {
 	auto iter = op_names.find(op);
@@ -194,6 +199,7 @@ static const char *op_name(enum op op) {
 struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
+	vector<string> xattr_prefixes;
 	std::set<enum op> ops; // fs operations to redirect
 
 	bool test_op(enum op op) {
@@ -263,7 +269,7 @@ struct Fs {
 	}
 	bool redirect_op(enum op op) {
 		auto r = redirect();
-		return r->test_op(op);
+		return op == OP_REDIRECT || r->test_op(op);
 	}
 
 private:
@@ -1592,9 +1598,36 @@ static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
 
 
 #ifdef HAVE_SETXATTR
+const string sys_acl_xattr_prefix = "system.posix_acl";
+
+static bool xattr_starts_with(const char *name, const string &prefix)
+{
+	return !prefix.empty() &&
+		strncmp(name, prefix.c_str(), prefix.size()) == 0;
+}
+static enum op redirect_xattr_op(enum op op, const char *name)
+{
+	if (fs.debug)
+		cerr << "DEBUG: " << op_name(op) << " " << name << endl;
+
+	// redirect xattr ops for names that match a redirect_xattr_prefix
+	for (const auto& prefix : fs.redirect()->xattr_prefixes) {
+	    if (xattr_starts_with(name, prefix))
+		return OP_REDIRECT;
+	}
+
+	// redirect implicit chmod/chown via setfacl
+	if (op == OP_SETXATTR && (fs.redirect_op(OP_CHMOD) || fs.redirect_op(OP_CHOWN)) &&
+	    xattr_starts_with(name, sys_acl_xattr_prefix))
+		return OP_REDIRECT;
+
+	return op;
+}
+
 static int do_getxattr(InodeRef& inode, const char *name, char *value,
 		size_t size) {
-	return getxattr(get_fd_path(inode.fd).c_str(), name, value, size);
+	auto op = redirect_xattr_op(OP_GETXATTR, name);
+	return getxattr(get_fd_path(inode.fd, op).c_str(), name, value, size);
 }
 
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -1642,7 +1675,7 @@ out:
 
 
 static int do_listxattr(InodeRef& inode, char *value, size_t size) {
-	return listxattr(get_fd_path(inode.fd).c_str(), value, size);
+	return listxattr(get_fd_path(inode.fd, OP_GETXATTR).c_str(), value, size);
 }
 
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
@@ -1689,7 +1722,8 @@ out:
 
 static int do_setxattr(InodeRef& inode, const char *name,
 		const char *value, size_t size, int flags) {
-	return setxattr(get_fd_path(inode.fd).c_str(), name, value, size, flags);
+	auto op = redirect_xattr_op(OP_SETXATTR, name);
+	return setxattr(get_fd_path(inode.fd, op).c_str(), name, value, size, flags);
 }
 
 static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -1713,6 +1747,7 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 	if (inode.error(req))
 		return;
 
+	auto op = redirect_xattr_op(OP_SETXATTR, name);
 	ssize_t ret;
 	int saverr;
 
@@ -1722,7 +1757,7 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 		goto out;
 	}
 
-	ret = removexattr(get_fd_path(inode.fd).c_str(), name);
+	ret = removexattr(get_fd_path(inode.fd, op).c_str(), name);
 	saverr = ret == -1 ? errno : 0;
 
 out:
@@ -1905,6 +1940,8 @@ static Redirect *read_config_file()
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
 			redirect->set_op(OP_OPEN_RW);
+		} else if (name == "redirect_xattr_prefix") {
+			redirect->xattr_prefixes.push_back(value);
 		} else if (name == "redirect_op") {
 			redirect->set_op(value);
 		}
