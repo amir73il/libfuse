@@ -598,6 +598,9 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 	if (conn->capable & FUSE_CAP_FLOCK_LOCKS)
 		conn->want |= FUSE_CAP_FLOCK_LOCKS;
 
+	if (conn->capable & FUSE_CAP_POSIX_ACL)
+		conn->want |= FUSE_CAP_POSIX_ACL;
+
 	// Use splicing if supported. Since we are using writeback caching
 	// and readahead, individual requests should have a decent size so
 	// that splicing between fd's is well worth it.
