@@ -115,6 +115,7 @@ struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	bool is_symlink {false};
 	ino_t src_ino {0};
+	uint32_t gen {0};
 	uint64_t nlookup {0};
 	std::mutex m;
 
@@ -312,13 +313,13 @@ struct xfs_fh {
 		fid.ino = fid.gen = 0;
 	}
 
-	xfs_fh(ino_t ino)
+	xfs_fh(ino_t ino, uint32_t gen)
 	{
-		// Fake xfs file handle to get inode by ino without generation
+		// Construct xfs file handle to get inode with or without generation
 		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = XFS_FILEID_TYPE_64FLAG;
+		fh.handle_type = gen ? XFS_FILEID_INO64_GEN : XFS_FILEID_TYPE_64FLAG;
 		fid.ino = ino;
-		fid.gen = 0;
+		fid.gen = gen;
 	}
 };
 
@@ -403,10 +404,13 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	return path;
 }
 
-static int open_by_ino(ino_t ino)
+static int open_by_ino(InodePtr inode)
 {
-	// open by fake XFS file handle
-	struct xfs_fh fake_xfs_fh{ino};
+	auto ino = inode->src_ino;
+	auto gen = inode->gen;
+
+	// open by real or fake XFS file handle
+	struct xfs_fh fake_xfs_fh{ino, gen};
 
 	int fd = open_by_handle_at(fs.root->_fd, &fake_xfs_fh.fh, O_PATH);
 	if (fd > 0 && fs.debug)
@@ -437,7 +441,7 @@ struct InodeRef {
 
 		fd = i->_fd;
 		if (fd == -1) {
-			fd = open_by_ino(src_ino);
+			fd = open_by_ino(inode);
 		}
 		if (fd == -1) {
 			fd = -errno;
@@ -673,7 +677,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	int newfd;
 	if (strcmp(name, ".") == 0) {
-		newfd = open_by_ino(parent.src_ino);
+		newfd = open_by_ino(parent.i);
 	} else if (strcmp(name, "..") == 0) {
 		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	} else {
@@ -747,6 +751,12 @@ static int do_lookup(InodeRef& parent, const char *name,
 	bool found = (iter != fs.inodes.end());
 	InodePtr inode_ptr;
 
+	if (found && iter->second->gen != xfs_fh.fid.gen) {
+		cerr << "WARNING: lookup(): inode " << src_ino
+			<< " generation " << e->generation
+			<< " mismatch - forget reused inode." << endl;
+		found = false;
+	}
 	if (found) {
 		inode_ptr = iter->second;
 	} else try {
@@ -790,6 +800,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		   point no other thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
 		inode.src_ino = src_ino;
+		inode.gen = xfs_fh.fid.gen;
 		inode.is_symlink = S_ISLNK(e->attr.st_mode);
 		inode.nlookup = 1;
 		if (parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode)) {
