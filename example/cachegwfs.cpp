@@ -69,6 +69,8 @@
 #include <pthread.h>
 #include <sys/fsuid.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <xfs/xfs.h>
 
 // C++ includes
 #include <cstddef>
@@ -222,6 +224,7 @@ struct Fs {
 	bool nosplice;
 	bool nocache;
 	bool wbcache;
+	bool bulkstat {true};
 
 	Fs() {
 		// Initialize a dead inode
@@ -404,17 +407,64 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	return path;
 }
 
+static uint32_t xfs_bulkstat_gen(__u64 ino)
+{
+	// Method only works for XFS and requires SYS_CAP_ADMIN
+	if (!fs.bulkstat)
+		return 0;
+
+	__s32 count = 0;
+	struct xfs_bstat bstat = { };
+	struct xfs_fsop_bulkreq breq = {
+		.lastip = &ino,
+		.icount = 1,
+		.ubuffer = (void *)&bstat,
+		.ocount = &count,
+	};
+
+	if (ioctl(fs.root->_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
+		cerr << "WARNING: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		// Try open by handle with zero generation
+		return 0;
+	}
+
+	if (fs.debug) {
+		cerr << "DEBUG: open_by_ino(): ino=" << ino << ", count=" << count
+			<< ", bs_ino=" << bstat.bs_ino  << ", bs_gen=" << bstat.bs_gen <<  endl;
+	}
+
+	return bstat.bs_gen;
+}
+
 static int open_by_ino(InodePtr inode)
 {
 	auto ino = inode->src_ino;
 	auto gen = inode->gen;
 
+	// We usually use the gen that we stored during lookup
+	// Only in the special case of lookup(ino, ".") (i.e. recover
+	// an NFS file handle after server restart), we need to resort
+	// to bulkstat which may or may not be supported by filesystem
+	if (!gen)
+		gen = xfs_bulkstat_gen(ino);
+
 	// open by real or fake XFS file handle
 	struct xfs_fh fake_xfs_fh{ino, gen};
 
 	int fd = open_by_handle_at(fs.root->_fd, &fake_xfs_fh.fh, O_PATH);
-	if (fd > 0 && fs.debug)
+	if (fd < 0)
+		return fd;
+
+	if (!gen && fs.bulkstat) {
+		// We failed to get gen from ino using bulkstat but we could open by handle
+		// with zero gen (using XFS kernel patch) - do not try to use bulkstat again
+		cerr << "WARNING: kernel has open by ino - bulkstat disabled." << endl;
+		fs.bulkstat = false;
+	}
+
+	if (fs.debug)
 		get_fd_path(fd);
+
 	return fd;
 }
 
