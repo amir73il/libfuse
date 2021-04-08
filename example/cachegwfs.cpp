@@ -291,20 +291,22 @@ struct Cred {
 	Cred& operator=(Cred&&) = delete;
 	Cred& operator=(const Cred&) = delete;
 
-	Cred(fuse_req_t req) {
+	Cred(uid_t uid, gid_t gid) {
 		// Set requestor credentials
-		const struct fuse_ctx *ctx = fuse_req_ctx(req);
-
-		if (ctx->uid != fs.uid)
-			_uid = setfsuid(ctx->uid);
-		if (ctx->gid != fs.gid)
-			_gid = setfsgid(ctx->gid);
+		if (uid != fs.uid)
+			_uid = setfsuid(uid);
+		if (gid != fs.gid)
+			_gid = setfsgid(gid);
 	}
 	~Cred() {
+		auto savederrno = errno;
+
 		if (_uid != NULL_UID)
 			setfsuid(_uid);
 		if (_gid != NULL_GID)
 			setfsgid(_gid);
+
+		errno = savederrno;
 	}
 };
 
@@ -926,26 +928,77 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	}
 }
 
+// Assumes that op returns -1 on failure
+static int as_user(fuse_req_t req, int dirfd, const string &path,
+		const string &opname, function<int()> op)
+{
+	auto c = fuse_req_ctx(req);
+
+	if (!c)
+	{
+		cerr << "No fuse context: very strange" << endl;
+		return op();
+	}
+
+	{
+		Cred cred(c->uid, c->gid);
+		auto ret = op();
+
+		if (ret == 0 || errno != EACCES)
+			return ret;
+	}
+
+	/* Might fail due to setfsuid/gid not setting supplementary unix groups:
+	 * If the permission for the operation should be granted due to the
+	 * folder owner-group being one of the caller's supplementary groups,
+	 * it won't be respected: fallback to do it as root with an extra chown
+	 */
+	cerr << "DEBUG: " << opname << " " << path <<
+		" as user " << c->uid << "," << c->gid <<
+		": access denied. " <<
+		"fallback to do as root and chown" <<  endl;
+
+	auto opret = op();
+
+	if (opret == -1)
+		return opret;
+
+	auto operrno = errno;
+
+	auto chownret = fchownat(dirfd, path.c_str(), c->uid, c->gid,
+			AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+
+	if (chownret == -1)
+		cerr << "ERROR: chown new file failed: " << strerror(errno) << endl;
+
+	// It's important to return original op ret value, specialy for open
+	errno = operrno;
+	return opret;
+}
+
 
 static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_MKDIR, path);
-	Cred cred(req);
-	return mkdirat(dirfd, path.c_str(), mode);
+	return as_user(req, fd, name, __func__, [&](){
+			return mkdirat(dirfd, path.c_str(), mode);
+		});
 }
 
 static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_SYMLINK, path);
-	Cred cred(req);
-	return symlinkat(link, dirfd, path.c_str());
+	return as_user(req, fd, name, __func__, [&](){
+			return symlinkat(link, dirfd, path.c_str());
+		});
 }
 
 static int do_mknod(fuse_req_t req, int fd, const char *name, mode_t mode, dev_t rdev) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_MKNOD, path);
-	Cred cred(req);
-	return mknodat(dirfd, path.c_str(), mode, rdev);
+	return as_user(req, fd, name, __func__, [&](){
+			return mknodat(dirfd, path.c_str(), mode, rdev);
+		});
 }
 
 static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
@@ -1007,8 +1060,9 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 			errno = EOPNOTSUPP;
 			return -1;
 		}
-		Cred cred(req);
-		auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
+		auto res = as_user(req, dfd, name, __func__, [&](){
+				return linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
+			});
 		if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
 			/* Sorry, no race free way to hard-link a symlink. */
 			errno = EOPNOTSUPP;
@@ -1019,8 +1073,9 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 	string path = get_fd_path(inode.fd, OP_LINK);
 	string newpath;
 	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
-	Cred cred(req);
-	return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
+	return as_user(req, dfd, name, __func__, [&](){
+			return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
+		});
 }
 
 
@@ -1376,8 +1431,9 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode, int &dirfd) {
 	string path;
 	dirfd = get_fd_path_at(fd, name, OP_CREATE, path);
-	Cred cred(req);
-	return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+	return as_user(req, fd, name, __func__, [&](){
+			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
+		});
 }
 
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
