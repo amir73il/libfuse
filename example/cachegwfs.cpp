@@ -928,6 +928,35 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	}
 }
 
+static tuple<bool, gid_t, gid_t> get_sgid_and_gids(int dirfd, const string &path)
+{
+	struct stat st;
+
+	// The parent
+	if (fstatat(dirfd, "", &st,
+				AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) == -1)
+	{
+		cerr << "ERROR: stat parent of new file: " << strerror(errno) << ". " <<
+			"Ignoring SGID if exist and chowning also group" << endl;
+
+		return {false, -1, -1};
+	}
+
+	auto parent_sgid = st.st_mode & S_ISGID;
+	auto parent_gid = st.st_gid;
+
+	// The new file. This is just to get gid for debug print.
+	if (fstatat(dirfd, path.c_str(), &st,
+				AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) == -1)
+	{
+		cerr << "ERROR: stat new file: " << strerror(errno) << endl;
+
+		return {parent_sgid, parent_gid, -1};
+	}
+
+	return { parent_sgid, parent_gid, st.st_gid };
+}
+
 // Assumes that op returns -1 on failure
 static int as_user(fuse_req_t req, int dirfd, const string &path,
 		const string &opname, function<int()> op)
@@ -968,7 +997,34 @@ static int as_user(fuse_req_t req, int dirfd, const string &path,
 
 	auto operrno = errno;
 
-	auto chownret = fchownat(dirfd, path.c_str(), c->uid, c->gid,
+	auto gid = c->gid;
+	auto [is_sgid, parent_gid, file_gid] = get_sgid_and_gids(dirfd, path);
+
+	if (is_sgid)
+	{
+		if (parent_gid != file_gid)
+		{
+			cerr << "ERROR: parent with SGID, parent gid=" <<
+			       parent_gid << " but file created with gid=" <<
+			       file_gid << ". Will fix using chown. " << endl;
+
+			gid = parent_gid;
+		}
+		else
+		{
+			if (fs.debug)
+			{
+				cerr << "DEBUG: file group already set to " <<
+				       	file_gid << " due to SGID. "
+					"Chown only file owner" << endl;
+			}
+
+			// To leave file group as is
+			gid = -1;
+		}
+	}
+
+	auto chownret = fchownat(dirfd, path.c_str(), c->uid, gid,
 			AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
 	if (chownret == -1)
