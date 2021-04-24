@@ -953,10 +953,13 @@ static int as_user(fuse_req_t req, int dirfd, const string &path,
 	 * folder owner-group being one of the caller's supplementary groups,
 	 * it won't be respected: fallback to do it as root with an extra chown
 	 */
-	cerr << "DEBUG: " << opname << " " << path <<
-		" as user " << c->uid << "," << c->gid <<
-		": access denied. " <<
-		"fallback to do as root and chown" <<  endl;
+	if (fs.debug)
+	{
+		cerr << "DEBUG: " << opname << " " << path <<
+			" as user " << c->uid << "," << c->gid <<
+			": access denied. " <<
+			"fallback to do as root and chown" <<  endl;
+	}
 
 	auto opret = op();
 
