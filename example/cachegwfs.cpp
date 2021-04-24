@@ -1063,9 +1063,7 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 			errno = EOPNOTSUPP;
 			return -1;
 		}
-		auto res = as_user(req, dfd, name, __func__, [&](){
-				return linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
-			});
+		auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
 		if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
 			/* Sorry, no race free way to hard-link a symlink. */
 			errno = EOPNOTSUPP;
@@ -1076,9 +1074,7 @@ static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const
 	string path = get_fd_path(inode.fd, OP_LINK);
 	string newpath;
 	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
-	return as_user(req, dfd, name, __func__, [&](){
-			return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
-		});
+	return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
 }
 
 
