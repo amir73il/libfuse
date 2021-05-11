@@ -1205,7 +1205,6 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	if (inode_p.error(req))
 		return;
 
-	lock_guard<mutex> g {inode_p.i->m};
 	string path;
 	int dirfd = get_fd_path_at(inode_p.fd, name, OP_RMDIR, path);
 	auto res = unlinkat(dirfd, path.c_str(), AT_REMOVEDIR);
@@ -1345,11 +1344,6 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		return;
 	}
 
-	// Make Helgrind happy - it can't know that there's an implicit
-	// synchronization due to the fact that other threads cannot
-	// access d until we've called fuse_reply_*.
-	lock_guard<mutex> g {inode.i->m};
-
 	string path;
 	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPEN_RO, path);
 	auto fd = openat(dirfd, path.c_str(), O_RDONLY);
@@ -1398,7 +1392,6 @@ static void do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 		return;
 
 	auto d = get_dir_handle(fi);
-	lock_guard<mutex> g {inode.i->m};
 	char *p;
 	auto rem = size;
 	int err = 0, count = 0;
