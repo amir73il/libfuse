@@ -1085,7 +1085,7 @@ static int as_user(fuse_req_t req, int dirfd, const string &path,
 static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_MKDIR, path);
-	return as_user(req, fd, name, __func__, [&](){
+	return as_user(req, dirfd, path, __func__, [&](){
 			return mkdirat(dirfd, path.c_str(), mode);
 		});
 }
@@ -1093,7 +1093,7 @@ static int do_mkdir(fuse_req_t req, int fd, const char *name, mode_t mode) {
 static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_SYMLINK, path);
-	return as_user(req, fd, name, __func__, [&](){
+	return as_user(req, dirfd, path, __func__, [&](){
 			return symlinkat(link, dirfd, path.c_str());
 		});
 }
@@ -1101,7 +1101,7 @@ static int do_symlink(fuse_req_t req, const char *link, int fd, const char *name
 static int do_mknod(fuse_req_t req, int fd, const char *name, mode_t mode, dev_t rdev) {
 	string path;
 	int dirfd = get_fd_path_at(fd, name, OP_MKNOD, path);
-	return as_user(req, fd, name, __func__, [&](){
+	return as_user(req, dirfd, path, __func__, [&](){
 			return mknodat(dirfd, path.c_str(), mode, rdev);
 		});
 }
@@ -1517,7 +1517,7 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode, int &dirfd) {
 	string path;
 	dirfd = get_fd_path_at(fd, name, OP_CREATE, path);
-	return as_user(req, fd, name, __func__, [&](){
+	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
 		});
 }
