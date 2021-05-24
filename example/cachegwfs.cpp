@@ -1695,12 +1695,8 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 
 
 static int do_statfs(int fd, struct statvfs *stbuf) {
-	if (fs.redirect_op(OP_STATFS)) {
-		string path = get_fd_path(fd, OP_STATFS);
-		return statvfs(path.c_str(), stbuf);
-	} else {
-		return fstatvfs(fd, stbuf);
-	}
+	string path = get_fd_path(fd, OP_STATFS);
+	return statvfs(path.c_str(), stbuf);
 }
 
 static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
