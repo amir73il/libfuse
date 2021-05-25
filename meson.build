@@ -212,7 +212,7 @@ configure_file(output: 'libfuse_config.h',
                install: true, install_dir: join_paths(get_option('includedir'), 'fuse3'))
 
 # '.' will refer to current build directory, which contains config.h
-include_dirs = include_directories('include', 'lib', '.')
+include_dirs = include_directories('include', 'lib', 'passthrough', '.')
 
 # Common dependencies
 thread_dep = dependency('threads') 
@@ -223,6 +223,10 @@ thread_dep = dependency('threads')
 subdirs = [ 'lib', 'include']
 if get_option('utils') and not platform.endswith('bsd') and platform != 'dragonfly'
   subdirs += [ 'util', 'doc' ]
+endif
+
+if get_option('passthrough') and not platform.endswith('bsd') and platform != 'dragonfly' and add_languages('cpp', required : false)
+  subdirs += 'passthrough'
 endif
 
 if get_option('examples')
