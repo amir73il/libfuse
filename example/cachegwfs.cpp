@@ -376,7 +376,7 @@ static bool should_redirect_fd(const char *procname, enum op op)
 // This value cannot be used for *at() syscalls!!!
 #define AT_PROCFD (AT_FDCWD - 1)
 
-int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
+static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 {
 	char procname[64];
 	sprintf(procname, "/proc/self/fd/%i", dirfd);
@@ -488,10 +488,10 @@ static int open_by_ino(InodePtr inode)
 
 // Short lived reference of inode to keep fd open
 struct InodeRef {
+	InodePtr i;
 	int fd {-1}; // Short lived O_PATH fd
 	const bool is_symlink;
 	const ino_t src_ino;
-	InodePtr i;
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -1113,7 +1113,7 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const char *name) {
+static int linkat_empty_nofollow(fuse_req_t, InodeRef& inode, int dfd, const char *name) {
 	if (inode.is_symlink) {
 		if (fs.redirect_op(OP_LINK)) {
 			errno = EOPNOTSUPP;
