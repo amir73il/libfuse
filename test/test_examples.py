@@ -171,18 +171,22 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
+@pytest.mark.parametrize("name", ('passthrough_hp', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
-def test_passthrough_hp(short_tmpdir, cache, output_checker):
+def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
 
     cmdline = base_cmdline + \
-              [ pjoin(basename, 'example', 'passthrough_hp'),
+              [ pjoin(basename, 'example', name),
                 src_dir, mnt_dir ]
+
+    if name == 'cachegwfs':
+        cmdline.append('--debug')
 
     if not cache:
         cmdline.append('--nocache')
-        
+
     mount_process = subprocess.Popen(cmdline, stdout=output_checker.fd,
                                      stderr=output_checker.fd)
     try:
