@@ -389,7 +389,7 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	}
 	if (n > 0 && fs.debug) {
 		linkname[n] = 0;
-		cerr << "DEBUG: " << procname
+		cerr << "DEBUG: " << op_name(op) << " " << procname
 			<< " -> " << linkname << endl;
 	}
 	int prefix = fs.source.size();
@@ -2022,6 +2022,11 @@ static bool parseConfigLine(const string &line, string &name, string &value)
 
 static Redirect *read_config_file()
 {
+	if (fs.redirect_path.empty()) {
+		// Redirect disabled with mount options
+		return nullptr;
+	}
+
 	std::ifstream cFile(fs.config_file);
 	if (!cFile.is_open()) {
 		cerr << "ERROR: Open config file failed." << endl;
