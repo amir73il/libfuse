@@ -485,10 +485,17 @@ static InodePtr get_inode(fuse_ino_t ino) {
 }
 
 
-// The object that hangs off of fi->fh for an open FUSE file (non-dir)
-struct File {
+// The object that hangs off of fi->fh for an open FUSE file (or directory)
+struct FileHandle {
+	virtual int get_fd() = 0;
+	virtual ~FileHandle() {};
+};
+
+struct File : public FileHandle {
 	int _fd {-1};
 	const bool redirected;
+
+	int get_fd() override { return _fd; };
 
 	File() = delete;
 	File(const File&) = delete;
@@ -511,12 +518,12 @@ struct File {
 	}
 };
 
-static File *get_file_handle(fuse_file_info *fi) {
-	return reinterpret_cast<File*>(fi->fh);
+static FileHandle *get_file_handle(fuse_file_info *fi) {
+	return reinterpret_cast<FileHandle*>(fi->fh);
 }
 
 static int get_file_fd(fuse_file_info *fi) {
-	return get_file_handle(fi)->_fd;
+	return get_file_handle(fi)->get_fd();
 }
 
 
@@ -1077,9 +1084,11 @@ static void sfs_readlink(fuse_req_t req, fuse_ino_t ino) {
 }
 
 
-struct DirHandle {
+struct DirHandle : public FileHandle {
 	DIR *dp {nullptr};
 	off_t offset;
+
+	int get_fd() override { return dirfd(dp); };
 
 	DirHandle() = default;
 	DirHandle(const DirHandle&) = delete;
@@ -1329,7 +1338,7 @@ static void sfs_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 		fuse_file_info *fi) {
 	(void) ino;
 	int res;
-	int fd = dirfd(get_dir_handle(fi)->dp);
+	int fd = get_file_fd(fi);
 	if (datasync)
 		res = fdatasync(fd);
 	else
