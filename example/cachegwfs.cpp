@@ -80,6 +80,7 @@
 #include <fstream>
 #include <thread>
 #include <iomanip>
+#include <atomic>
 #include <set>
 
 using namespace std;
@@ -162,6 +163,12 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
 };
+static const char *op_name(enum op op) {
+	auto iter = op_names.find(op);
+	if (iter == op_names.end())
+		return "";
+	return iter->second;
+}
 
 // Redirect config that can be changed in runtime
 struct Redirect {
@@ -176,12 +183,6 @@ struct Redirect {
 		ops.insert(op);
 	}
 
-	const char *op_name(enum op op) {
-		auto iter = op_names.find(op);
-		if (iter == op_names.end())
-			return "";
-		return iter->second;
-	}
 	void set_op(const string &name) {
 		auto it = find_if(op_names.begin(), op_names.end(),
 				[name](decltype(*op_names.begin()) &p) {
@@ -193,6 +194,8 @@ struct Redirect {
 			cerr << "WARNING: unknown redirect operation " << name << endl;
 	}
 };
+
+static Redirect *read_config_file();
 
 struct Fs {
 	// Must be acquired *after* any Inode.m locks.
@@ -206,7 +209,6 @@ struct Fs {
 	std::string source;
 	std::string redirect_path;
 	std::string config_file;
-	Redirect redirect;
 	size_t blocksize;
 	dev_t src_dev;
 	bool nosplice;
@@ -216,13 +218,33 @@ struct Fs {
 		// Get own credentials
 		uid = geteuid();
 		gid = getegid();
+		// Initialize default redirect, but do not mark it valid
+		_redirect.reset(new Redirect());
 	}
 
-	// Reset to default runtime config values
+	// Lazy reload config file on next redirect test
 	void reset_config() {
-		debug = false;
-		redirect = Redirect();
+		config_is_valid.clear();
 	}
+	shared_ptr<Redirect> redirect() {
+		auto reload = !config_is_valid.test_and_set();
+		if (reload) {
+			auto r = shared_ptr<Redirect>(read_config_file());
+			if (r != nullptr) {
+				atomic_store(&_redirect, r);
+				return r;
+			}
+		}
+		return atomic_load(&_redirect);
+	}
+	bool redirect_op(enum op op) {
+		auto r = redirect();
+		return r->test_op(op);
+	}
+
+private:
+	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
+	shared_ptr<Redirect> _redirect;
 };
 static Fs fs{};
 
@@ -302,7 +324,8 @@ static bool should_redirect_fd(int fd, enum op op)
 	else
 		return true;
 
-	const string &redirect_xattr = rw ? fs.redirect.write_xattr : fs.redirect.read_xattr;
+	auto r = fs.redirect();
+	const string &redirect_xattr = rw ? r->write_xattr : r->read_xattr;
 	if (redirect_xattr.empty())
 		return true;
 
@@ -317,7 +340,7 @@ static bool should_redirect_fd(int fd, enum op op)
 // Returns dirfd and sets outpath to redirected path relative to dirfd.
 // There is no elevated refcount on returned dirfd.
 //
-// If @op is in fs.redirect.ops, then @outpath is set to redirected path
+// If @op is in redirect ops, then @outpath is set to redirected path
 // and AT_FDCWD is returned.
 //
 // @name may be empty, in which case non redirected @outpath is set to
@@ -331,7 +354,7 @@ int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 	sprintf(procname, "/proc/self/fd/%i", dirfd);
 	char linkname[PATH_MAX];
 	int n = 0;
-	bool redirect_op = fs.redirect.test_op(op);
+	bool redirect_op = fs.redirect_op(op);
 
 	if (fs.debug || redirect_op) {
 		n = readlink(procname, linkname, PATH_MAX);
@@ -346,7 +369,7 @@ int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
 	    !memcmp(fs.source.c_str(), linkname, prefix) &&
 	    should_redirect_fd(dirfd, op)) {
 		if (fs.debug)
-			cerr << "DEBUG: redirect " << fs.redirect.op_name(op)
+			cerr << "DEBUG: redirect " << op_name(op)
 				<< " |=> " << linkname + prefix << endl;
 		outpath = fs.redirect_path;
 		outpath.append(linkname + prefix, n - prefix);
@@ -824,7 +847,7 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 
 static int linkat_empty_nofollow(fuse_req_t req, InodeRef& inode, int dfd, const char *name) {
 	if (inode.is_symlink) {
-		if (fs.redirect.test_op(OP_LINK)) {
+		if (fs.redirect_op(OP_LINK)) {
 			errno = EOPNOTSUPP;
 			return -1;
 		}
@@ -1325,7 +1348,7 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 
 
 static int do_statfs(int fd, struct statvfs *stbuf) {
-	if (fs.redirect.test_op(OP_STATFS)) {
+	if (fs.redirect_op(OP_STATFS)) {
 		string path = get_fd_path(fd, OP_STATFS);
 		return statvfs(path.c_str(), stbuf);
 	} else {
@@ -1664,14 +1687,21 @@ static bool parseConfigLine(const string &line, string &name, string &value)
 	return true;
 }
 
-static void read_config_file(int) {
+static Redirect *read_config_file()
+{
 	std::ifstream cFile(fs.config_file);
-	if (!cFile.is_open())
-		return;
+	if (!cFile.is_open()) {
+		cerr << "ERROR: Open config file failed." << endl;
+		return nullptr;
+	}
 
-	// Reset to config defaults
-	fs.reset_config();
+	Redirect *redirect = new (nothrow) Redirect();
+	if (!redirect) {
+		cerr << "ERROR: Allocate new config failed." << endl;
+		return nullptr;
+	}
 
+	bool debug = false;
 	std::string line;
 	while (getline(cFile, line)) {
 		string name, value;
@@ -1681,17 +1711,27 @@ static void read_config_file(int) {
 
 		std::cout << name << " = " << value << std::endl;
 		if (name == "debug") {
-			fs.debug = std::stoi(value);
+			debug = std::stoi(value);
 		} else if (name == "redirect_read_xattr") {
-			fs.redirect.read_xattr = value;
-			fs.redirect.set_op(OP_OPEN_RO);
+			redirect->read_xattr = value;
+			redirect->set_op(OP_OPEN_RO);
 		} else if (name == "redirect_write_xattr") {
-			fs.redirect.write_xattr = value;
-			fs.redirect.set_op(OP_OPEN_RW);
+			redirect->write_xattr = value;
+			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_op") {
-			fs.redirect.set_op(value);
+			redirect->set_op(value);
 		}
 	}
+
+	fs.debug = debug;
+
+	return redirect;
+}
+
+static void reload_config(int)
+{
+	// Request config reload
+	fs.reset_config();
 }
 
 static void set_signal_handler()
@@ -1699,7 +1739,7 @@ static void set_signal_handler()
 	struct sigaction sa;
 
 	memset(&sa, 0, sizeof(struct sigaction));
-	sa.sa_handler = read_config_file;
+	sa.sa_handler = reload_config;
 	sigemptyset(&(sa.sa_mask));
 
 	if (sigaction(SIGHUP, &sa, NULL) == -1)
@@ -1726,7 +1766,7 @@ int main(int argc, char *argv[]) {
 	auto options {parse_options(argc, argv)};
 
 	// Read defaults from config file
-	read_config_file(0);
+	(void)fs.redirect();
 	// Re-load config file on SIGHUP
 	set_signal_handler();
 
