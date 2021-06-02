@@ -679,7 +679,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : NULL_UID;
 		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : NULL_GID;
 
-		res = fchownat(AT_FDCWD, get_fd_path(ifd, OP_CHOWN).c_str(), uid, gid, AT_SYMLINK_NOFOLLOW);
+		res = fchownat(AT_FDCWD, get_fd_path(ifd, OP_CHOWN).c_str(), uid, gid, 0);
 		if (res == -1)
 			goto out_err;
 	}
