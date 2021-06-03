@@ -37,6 +37,7 @@ if not platform.endswith('bsd') and platform != 'dragonfly'
                install: false)
     executable('cachegwfs', 'cachegwfs.cpp',
                dependencies: [ thread_dep, libfuse_dep ],
+               cpp_args : '-std=c++17',
                install: true, install_dir: get_option('bindir'))
 endif
 
