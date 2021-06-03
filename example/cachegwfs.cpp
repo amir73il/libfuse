@@ -1983,7 +1983,7 @@ int main(int argc, char *argv[]) {
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
 			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "default_permissions,fsname=cachegw,subtype=cachegw") ||
+			fuse_opt_add_arg(&args, "allow_other,default_permissions,fsname=cachegw,subtype=cachegw") ||
 			(options.count("debug-fuse") && fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
