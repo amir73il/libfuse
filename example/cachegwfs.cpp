@@ -826,8 +826,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	if (found && iter->second->gen != xfs_fh.fid.gen) {
 		cerr << "INFO: lookup(): inode " << src_ino
 			<< " generation " << e->generation
-			<< " mismatch - forget reused inode." << endl;
-		found = false;
+			<< " mismatch - reused inode." << endl;
 	}
 	if (found) {
 		inode_ptr = iter->second;
@@ -861,6 +860,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
 				<< "; gen = " << xfs_fh.fid.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
+		inode.gen = xfs_fh.fid.gen;
 		// Maybe update long lived fd if opened initially by handle
 		if (inode._fd == -1 && parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode))
 			inode.keepfd(newfd_g);
