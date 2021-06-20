@@ -513,7 +513,8 @@ struct InodeRef {
 		}
 		if (fd == -1) {
 			fd = -errno;
-			cerr << "INTERNAL ERROR: failed to open fd for inode " << src_ino << endl;
+			cerr << "INFO: failed to open fd for inode " << src_ino
+				<< ", err=" << fd  << ", gen=" << inode->gen <<  endl;
 		}
 	}
 
@@ -573,7 +574,7 @@ struct File : public FileHandle {
 		// cachegw manager takes an exclusive lock before making file a stub
 		if (!redirected && flock(fd, LOCK_SH | LOCK_NB) == -1) {
 			_fd = -errno;
-			cerr << "ERROR: file is locked for read/write access." << endl;
+			cerr << "INFO: file is locked for read/write access." << endl;
 		}
 		if (fs.debug)
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
@@ -823,7 +824,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	InodePtr inode_ptr;
 
 	if (found && iter->second->gen != xfs_fh.fid.gen) {
-		cerr << "WARNING: lookup(): inode " << src_ino
+		cerr << "INFO: lookup(): inode " << src_ino
 			<< " generation " << e->generation
 			<< " mismatch - forget reused inode." << endl;
 		found = false;
@@ -857,8 +858,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 			return ESTALE;
 		}
 		if (fs.debug)
-			cerr << "DEBUG: lookup(): inode " << src_ino
-				<< " (userspace) already known; fd = " << inode._fd << endl;
+			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
+				<< "; gen = " << xfs_fh.fid.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
 		// Maybe update long lived fd if opened initially by handle
 		if (inode._fd == -1 && parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode))
@@ -885,7 +886,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 		if (fs.debug)
 			cerr << "DEBUG: lookup(): created userspace inode " << src_ino
-				<< "; fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.fid.gen << ",fd = " << inode._fd << endl;
 	}
 
 	return 0;
@@ -965,7 +966,7 @@ static int as_user(fuse_req_t req, int dirfd, const string &path,
 
 	if (!c)
 	{
-		cerr << "No fuse context: very strange" << endl;
+		cerr << "WARNING: No fuse context: very strange" << endl;
 		return op();
 	}
 
