@@ -379,12 +379,16 @@ struct xfs_fh {
 	bool decode()
 	{
 		if (is_ino64()) {
+			nodeid = fid.ino;
 			ino = fid.ino;
 			gen = fid.gen;
 			return true;
 		}
 
 		if (is_ino32()) {
+			// With 32bit ino, FUSE nodeid is encoded from
+			// 32bit src_ino and 32bit generation
+			nodeid = ((uint64_t)fid32.gen) << 32 | fid32.ino;
 			ino = fid32.ino;
 			gen = fid32.gen;
 			return true;
@@ -394,6 +398,7 @@ struct xfs_fh {
 	}
 
 	// These values are only valid after calling decode()
+	ino_t nodeid{0};
 	ino_t ino{0};
 	ino_t gen{0};
 };
@@ -859,7 +864,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		return EIO;
 	}
 
-	e->ino = src_ino;
+	e->ino = xfs_fh.nodeid;
 	e->generation = xfs_fh.gen;
 
 #ifdef DEBUG_INTERNAL_ERROR_UNKNOWN_INO
@@ -869,7 +874,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 #endif
 
 	unique_lock<mutex> fs_lock {fs.mutex};
-	auto iter = fs.inodes.find(src_ino);
+	auto iter = fs.inodes.find(e->ino);
 	bool found = (iter != fs.inodes.end());
 	InodePtr inode_ptr;
 
@@ -881,8 +886,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 	if (found) {
 		inode_ptr = iter->second;
 	} else try {
-		fs.inodes[src_ino].reset(new Inode());
-		inode_ptr = fs.inodes[src_ino];
+		fs.inodes[e->ino].reset(new Inode());
+		inode_ptr = fs.inodes[e->ino];
 	} catch (std::bad_alloc&) {
 		return ENOMEM;
 	}
@@ -956,6 +961,11 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 		// request to open by FUSE file handle
 		inode_p->_fd = 0;
 		inode_p->src_ino = parent;
+		// With 32bit ino, FUSE nodeid is encoded from 32bit src_ino and 32bit generation
+		if (fs.ino32) {
+			inode_p->gen = parent >> 32;
+			inode_p->src_ino &= 0xffffffff;
+		}
 	} else {
 		inode_p = get_inode(parent);
 	}
@@ -1458,11 +1468,16 @@ static void do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 
 		fuse_entry_param e{};
 		size_t entsize;
-		if(plus) {
+		// With 32bit ino, lookup to encode d_ino from ino+generation
+		if (plus || fs.ino32) {
 			err = do_lookup(inode, entry->d_name, &e);
 			if (err)
 				goto error;
-			entsize = fuse_add_direntry_plus(req, p, rem, entry->d_name, &e, entry->d_off);
+
+			if (plus)
+				entsize = fuse_add_direntry_plus(req, p, rem, entry->d_name, &e, entry->d_off);
+			else
+				entsize = fuse_add_direntry(req, p, rem, entry->d_name, &e.attr, entry->d_off);
 
 			if (entsize > rem) {
 				if (fs.debug)
