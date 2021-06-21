@@ -240,6 +240,7 @@ struct Fs {
 	bool nosplice;
 	bool nocache;
 	bool wbcache;
+	bool ino32 {false};
 	bool bulkstat {true};
 
 	Fs() {
@@ -319,29 +320,82 @@ struct Cred {
 
 #define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
 #define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
+#define FS_FILEID_INO32_GEN 1
 
-struct xfs_fid64 {
+struct fid64 {
 	uint64_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct fid32 {
+	uint32_t ino;
 	uint32_t gen;
 } __attribute__((packed));
 
 struct xfs_fh {
 	struct file_handle fh;
-	struct xfs_fid64 fid;
+	union {
+		struct fid64 fid;
+		struct fid32 fid32;
+	};
 
 	xfs_fh() {
+		// Initialize file handle buffer to detect -o inode64/inode32
 		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = 0;
 		fid.ino = fid.gen = 0;
 	}
 
-	xfs_fh(ino_t ino, uint32_t gen)
+	xfs_fh(ino_t ino, uint32_t gen, bool ino32)
 	{
-		// Construct xfs file handle to get inode with or without generation
+		if (ino32)
+			init_fid32(ino, gen);
+		else
+			init_fid64(ino, gen);
+	}
+
+	void init_fid64(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode64
 		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = gen ? XFS_FILEID_INO64_GEN : XFS_FILEID_TYPE_64FLAG;
+		fh.handle_type = XFS_FILEID_INO64_GEN;
 		fid.ino = ino;
 		fid.gen = gen;
 	}
+
+	void init_fid32(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode32
+		fh.handle_bytes = sizeof(fid32);
+		fh.handle_type = FS_FILEID_INO32_GEN;
+		fid32.ino = ino;
+		fid32.gen = gen;
+	}
+
+	// FILEID_INO32_GEN could be xfs with -o inode32, ext4 or many other fs
+	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
+	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
+
+	bool decode()
+	{
+		if (is_ino64()) {
+			ino = fid.ino;
+			gen = fid.gen;
+			return true;
+		}
+
+		if (is_ino32()) {
+			ino = fid32.ino;
+			gen = fid32.gen;
+			return true;
+		}
+
+		return false;
+	}
+
+	// These values are only valid after calling decode()
+	ino_t ino{0};
+	ino_t gen{0};
 };
 
 // Check if this is an empty place holder (a.k.a stub file).
@@ -441,7 +495,9 @@ static uint32_t xfs_bulkstat_gen(__u64 ino)
 	};
 
 	if (ioctl(fs.root->_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
-		cerr << "WARNING: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		auto saverr = errno;
+		cerr << "INFO: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		errno = saverr;
 		// Try open by handle with zero generation
 		return 0;
 	}
@@ -466,19 +522,13 @@ static int open_by_ino(InodePtr inode)
 	if (!gen)
 		gen = xfs_bulkstat_gen(ino);
 
-	// open by real or fake XFS file handle
-	struct xfs_fh fake_xfs_fh{ino, gen};
+	// open by reconstructed file handle
+	// With ext4, this also works with gen 0 (for any)
+	struct xfs_fh fake_fh{ino, gen, fs.ino32};
 
-	int fd = open_by_handle_at(fs.root->_fd, &fake_xfs_fh.fh, O_PATH);
+	int fd = open_by_handle_at(fs.root->_fd, &fake_fh.fh, O_PATH);
 	if (fd < 0)
 		return fd;
-
-	if (!gen && fs.bulkstat) {
-		// We failed to get gen from ino using bulkstat but we could open by handle
-		// with zero gen (using XFS kernel patch) - do not try to use bulkstat again
-		cerr << "WARNING: kernel has open by ino - bulkstat disabled." << endl;
-		fs.bulkstat = false;
-	}
 
 	if (fs.debug)
 		get_fd_path(fd);
@@ -800,17 +850,17 @@ static int do_lookup(InodeRef& parent, const char *name,
 		// found root when reconnecting directory file handle, i.e. lookup(ino, "..")
 		e->ino = FUSE_ROOT_ID;
 		return 0;
-	} else if (xfs_fh.fh.handle_type != XFS_FILEID_INO64_GEN) {
-		cerr << "WARNING: Source directory expected to be XFS." << endl;
+	} else if (!xfs_fh.decode()) {
+		cerr << "WARNING: Source directory expected to be XFS or ext4." << endl;
 		return ENOTSUP;
-	} else if (src_ino != xfs_fh.fid.ino) {
+	} else if (src_ino != xfs_fh.ino) {
 		cerr << "ERROR: Source st_ino " << src_ino <<
-			" and file handle ino " << xfs_fh.fid.ino << " mismatch." << endl;
+			" and file handle ino " << xfs_fh.ino << " mismatch." << endl;
 		return EIO;
 	}
 
 	e->ino = src_ino;
-	e->generation = xfs_fh.fid.gen;
+	e->generation = xfs_fh.gen;
 
 #ifdef DEBUG_INTERNAL_ERROR_UNKNOWN_INO
 	// Fake lookup success without inserting to inodes map.
@@ -823,7 +873,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	bool found = (iter != fs.inodes.end());
 	InodePtr inode_ptr;
 
-	if (found && iter->second->gen != xfs_fh.fid.gen) {
+	if (found && iter->second->gen != xfs_fh.gen) {
 		cerr << "INFO: lookup(): inode " << src_ino
 			<< " generation " << e->generation
 			<< " mismatch - reused inode." << endl;
@@ -858,9 +908,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 		}
 		if (fs.debug)
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
-				<< "; gen = " << xfs_fh.fid.gen << ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
-		inode.gen = xfs_fh.fid.gen;
+		inode.gen = xfs_fh.gen;
 		// Maybe update long lived fd if opened initially by handle
 		if (inode._fd == -1 && parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode))
 			inode.keepfd(newfd_g);
@@ -872,7 +922,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		   point no other thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
 		inode.src_ino = src_ino;
-		inode.gen = xfs_fh.fid.gen;
+		inode.gen = xfs_fh.gen;
 		inode.is_symlink = S_ISLNK(e->attr.st_mode);
 		inode.nlookup = 1;
 		if (parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode)) {
@@ -886,7 +936,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 		if (fs.debug)
 			cerr << "DEBUG: lookup(): created userspace inode " << src_ino
-				<< "; gen = " << xfs_fh.fid.gen << ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 	}
 
 	return 0;
@@ -2135,6 +2185,25 @@ int main(int argc, char *argv[]) {
 	fs.root->_fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
 	if (fs.root->_fd == -1)
 		err(1, "ERROR: open(\"%s\")", fs.source.c_str());
+
+	int mount_id;
+	struct xfs_fh xfs_fh{};
+	ret = name_to_handle_at(fs.root->_fd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+	if (ret == -1)
+		err(1, "ERROR: name_to_handle_at(\"%s\")", fs.source.c_str());
+
+	// Auto detect xfs with -o inode32 (or ext4)
+	fs.ino32 = xfs_fh.is_ino32();
+	// bulkstat support is an indication of xfs
+	fs.bulkstat = xfs_bulkstat_gen(fs.root->src_ino);
+	if (!fs.bulkstat) {
+		if (errno == EPERM)
+			errx(1, "ERROR: insufficient privileges");
+		if (!fs.ino32)
+			errx(1, "ERROR: source filesystem type not supported");
+	}
+	cout << "source filesystem looks like " << (fs.bulkstat ? "xfs" : "ext4")
+		<< " -o inode" << (fs.ino32 ? "32" : "64") << endl;
 
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
