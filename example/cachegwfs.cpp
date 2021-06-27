@@ -115,7 +115,6 @@ struct fd_guard {
 
 struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
-	bool is_symlink {false};
 	ino_t src_ino {0};
 	uint32_t gen {0};
 	uint64_t nlookup {0};
@@ -555,7 +554,6 @@ static int open_by_ino(InodePtr inode)
 struct InodeRef {
 	InodePtr i;
 	int fd {-1}; // Short lived O_PATH fd
-	const bool is_symlink;
 	const ino_t src_ino;
 
 	// Delete copy constructor and assignments. We could implement
@@ -566,8 +564,7 @@ struct InodeRef {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(InodePtr inode) : i(inode),
-		is_symlink(inode->is_symlink), src_ino(inode->src_ino)
+	InodeRef(InodePtr inode) : i(inode), src_ino(inode->src_ino)
 	{
 		if (i->dead())
 			return;
@@ -702,27 +699,6 @@ static void sfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 }
 
 
-#ifdef HAVE_UTIMENSAT
-static int utimensat_empty_nofollow(InodeRef& inode,
-		const struct timespec *tv) {
-	if (inode.is_symlink) {
-		/*
-		 * Does not work on current kernels, but may in the future:
-		 * https://marc.info/?l=linux-kernel&m=154158217810354&w=2
-		 */
-		auto res = utimensat(inode.fd, "", tv, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
-		if (res == -1 && errno == EINVAL) {
-			/* Sorry, no race free way to set times on symlink. */
-			errno = EPERM;
-		}
-		return res;
-	}
-
-	return utimensat(AT_FDCWD, get_fd_path(inode.fd, OP_UTIMENS).c_str(), tv, 0);
-}
-#endif
-
-
 static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		int valid, struct fuse_file_info* fi) {
 	InodeRef inode(get_inode(ino));
@@ -780,7 +756,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 			res = futimens(get_file_fd(fi), tv);
 		else {
 #ifdef HAVE_UTIMENSAT
-			res = utimensat_empty_nofollow(inode, tv);
+			res = utimensat(AT_FDCWD, get_fd_path(ifd, OP_UTIMENS).c_str(), tv, 0);
 #else
 			res = -1;
 			errno = EOPNOTSUPP;
@@ -938,7 +914,6 @@ static int do_lookup(InodeRef& parent, const char *name,
 		lock_guard<mutex> g {inode.m};
 		inode.src_ino = src_ino;
 		inode.gen = xfs_fh.gen;
-		inode.is_symlink = S_ISLNK(e->attr.st_mode);
 		inode.nlookup = 1;
 		if (parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode)) {
 			// Hold long lived fd for subdirs of root
@@ -1184,21 +1159,8 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int linkat_empty_nofollow(fuse_req_t, InodeRef& inode, int dfd, const char *name) {
-	if (inode.is_symlink) {
-		if (fs.redirect_op(OP_LINK)) {
-			errno = EOPNOTSUPP;
-			return -1;
-		}
-		auto res = linkat(inode.fd, "", dfd, name, AT_EMPTY_PATH);
-		if (res == -1 && (errno == ENOENT || errno == EINVAL)) {
-			/* Sorry, no race free way to hard-link a symlink. */
-			errno = EOPNOTSUPP;
-		}
-		return res;
-	}
-
-	string path = get_fd_path(inode.fd, OP_LINK);
+static int do_link(int fd, int dfd, const char *name) {
+	string path = get_fd_path(fd, OP_LINK);
 	string newpath;
 	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
 	return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
@@ -1216,7 +1178,7 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 	e.attr_timeout = fs.timeout;
 	e.entry_timeout = fs.timeout;
 
-	auto res = linkat_empty_nofollow(req, inode, inode_p.fd, name);
+	auto res = do_link(inode.fd, inode_p.fd, name);
 	if (res == -1) {
 		fuse_reply_err(req, errno);
 		return;
@@ -1938,16 +1900,9 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 	ssize_t ret;
 	int saverr;
 
-	if (inode.is_symlink) {
-		/* Sorry, no race free way to setxattr on symlink. */
-		saverr = ENOTSUP;
-		goto out;
-	}
-
 	ret = removexattr(get_fd_path(inode.fd, op).c_str(), name);
 	saverr = ret == -1 ? errno : 0;
 
-out:
 	fuse_reply_err(req, saverr);
 }
 #endif
@@ -2196,7 +2151,6 @@ int main(int argc, char *argv[]) {
 	// Initialize filesystem root
 	fs.root.reset(new Inode());
 	fs.root->nlookup = 9999;
-	fs.root->is_symlink = false;
 	fs.timeout = options.count("nocache") ? 0 : 1.0;
 
 	struct stat stat;
