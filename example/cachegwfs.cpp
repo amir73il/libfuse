@@ -270,8 +270,9 @@ struct Fs {
 	}
 	bool redirect_op(enum op op) {
 		auto r = redirect();
-		return op == OP_REDIRECT || r->test_op(op);
+		return redirect_all || op == OP_REDIRECT || r->test_op(op);
 	}
+	bool redirect_all{false};
 
 private:
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
@@ -407,6 +408,12 @@ struct xfs_fh {
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
 static bool should_redirect_fd(const char *procname, enum op op)
 {
+	if (fs.redirect_all)
+		return true;
+
+	if (!fs.redirect_op(op))
+		return false;
+
 	bool rw;
 	if (op == OP_OPEN_RO)
 		rw = false;
@@ -448,18 +455,21 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	}
 	if (n > 0 && fs.debug) {
 		linkname[n] = 0;
-		cerr << "DEBUG: " << op_name(op) << " " << procname
-			<< " -> " << linkname << endl;
+		cerr << "DEBUG: " << op_name(op) << "(" << name << ")"
+			<< " @ " << procname << " -> " << linkname << endl;
 	}
 	int prefix = fs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
 	    !memcmp(fs.source.c_str(), linkname, prefix) &&
 	    should_redirect_fd(procname, op)) {
 		if (fs.debug)
-			cerr << "DEBUG: redirect " << op_name(op)
-				<< " |=> " << linkname + prefix << endl;
+			cerr << "DEBUG: redirect " << op_name(op) << "(" << name << ")"
+				<< " @ " << dirfd << " |=> ." << linkname + prefix << endl;
 		outpath = fs.redirect_path;
-		outpath.append(linkname + prefix, n - prefix);
+		if (fs.redirect_path.empty())
+			outpath.append(linkname);
+		else
+			outpath.append(linkname + prefix, n - prefix);
 		if (*name) {
 			outpath.append("/");
 			outpath.append(name);
@@ -2007,6 +2017,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("debug", "Enable filesystem debug messages")
 		("debug-fuse", "Enable libfuse debug messages")
 		("help", "Print help")
+		("redirect", "Redirect all operations")
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
@@ -2031,6 +2042,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		exit(2);
 	}
 
+	fs.redirect_all = options.count("redirect");
 	if (options.count("debug"))
 		fs.debug = true;
 	fs.nosplice = options.count("nosplice") != 0;
