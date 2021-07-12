@@ -118,6 +118,7 @@ struct Inode {
 	ino_t src_ino {0};
 	uint32_t gen {0};
 	uint64_t nlookup {0};
+	uint64_t folder_id {0};
 	std::mutex m;
 
 	bool dead() { return !src_ino; }
@@ -583,7 +584,8 @@ static int open_by_ino(InodePtr inode)
 struct InodeRef {
 	InodePtr i;
 	int fd {-1}; // Short lived O_PATH fd
-	const ino_t src_ino;
+	ino_t src_ino() const { return i->src_ino; }
+	uint64_t folder_id() const { return i->folder_id; }
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -593,7 +595,7 @@ struct InodeRef {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(InodePtr inode) : i(inode), src_ino(inode->src_ino)
+	InodeRef(InodePtr inode) : i(inode)
 	{
 		if (i->dead())
 			return;
@@ -604,7 +606,7 @@ struct InodeRef {
 		}
 		if (fd == -1) {
 			fd = -errno;
-			cerr << "INFO: failed to open fd for inode " << src_ino
+			cerr << "INFO: failed to open fd for inode " << i->src_ino
 				<< ", err=" << fd  << ", gen=" << inode->gen <<  endl;
 		}
 	}
@@ -821,7 +823,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 		fuse_entry_param *e) {
 	if (fs.debug)
 		cerr << "DEBUG: lookup(): name=" << name
-			<< ", parent=" << parent.src_ino << endl;
+			<< ", parent_ino=" << parent.src_ino()
+			<< ", parent_folder_id=" << parent.folder_id() << endl;
 	memset(e, 0, sizeof(*e));
 	e->attr_timeout = fs.timeout;
 	e->entry_timeout = fs.timeout;
@@ -925,6 +928,17 @@ static int do_lookup(InodeRef& parent, const char *name,
 	src_ino = FUSE_ROOT_ID;
 #endif
 
+	// Folder id of first level subdirs is their name.
+	// If subdir name is not a decimal number, the folder id is 0.
+	// For all other inodes, it is inheritted from the parent.
+	uint64_t folder_id = parent.folder_id();
+	if (parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode)) {
+		folder_id = strtoull(name, NULL, 10);
+		if (fs.debug && !folder_id)
+			cerr << "DEBUG: lookup(): first level subdir name '" << name
+				<< "' is not a folder id." << endl;
+	}
+
 	// Use convenience reference to Inode
 	Inode &inode = *inode_ptr;
 	if (found) { // found existing inode
@@ -940,8 +954,10 @@ static int do_lookup(InodeRef& parent, const char *name,
 				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
 		inode.gen = xfs_fh.gen;
-		// Maybe update long lived fd if opened initially by handle
-		if (inode._fd == -1 && parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode))
+		// Maybe update long lived fd and folder id if opened initially by handle
+		if (!inode.folder_id)
+			inode.folder_id = folder_id;
+		if (inode._fd == -1 && parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode))
 			inode.keepfd(newfd_g);
 		inode.nlookup++;
 	} else { // no existing inode
@@ -953,7 +969,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 		inode.src_ino = src_ino;
 		inode.gen = xfs_fh.gen;
 		inode.nlookup = 1;
-		if (parent.src_ino == root_ino && S_ISDIR(e->attr.st_mode)) {
+		inode.folder_id = folder_id;
+		if (parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode)) {
 			// Hold long lived fd for subdirs of root
 			inode.keepfd(newfd_g);
 		} else {
