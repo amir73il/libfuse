@@ -200,13 +200,20 @@ struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
 	vector<string> xattr_prefixes;
-	std::set<enum op> ops; // fs operations to redirect
+	std::unordered_set<enum op> ops; // fs operations to redirect
+	std::unordered_set<uint64_t> folder_ids; // folder ids to redirect
 
 	bool test_op(enum op op) {
 		return ops.count(op) > 0;
 	}
 	void set_op(enum op op) {
 		ops.insert(op);
+	}
+	bool test_folder_id(uint64_t folder_id) {
+		return folder_ids.count(folder_id) > 0;
+	}
+	void set_folder_id(uint64_t folder_id) {
+		folder_ids.insert(folder_id);
 	}
 
 	void set_op(const string &name) {
@@ -218,6 +225,13 @@ struct Redirect {
 			set_op(it->first);
 		else
 			cerr << "WARNING: unknown redirect operation " << name << endl;
+	}
+	void set_folder_id(const string &name) {
+		uint64_t folder_id = strtoull(name.c_str(), NULL, 10);
+		if (folder_id)
+			folder_ids.insert(folder_id);
+		else
+			cerr << "WARNING: illegal redirect folder id " << name << endl;
 	}
 };
 
@@ -406,7 +420,8 @@ struct xfs_fh {
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool should_redirect_fd(int fd, const char *procname, enum op op)
+static bool should_redirect_fd(int fd, const char *procname, enum op op,
+				uint64_t folder_id)
 {
 	if (fs.redirect_all)
 		return true;
@@ -423,6 +438,9 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 		return true;
 
 	auto r = fs.redirect();
+	if (rw && folder_id && r->test_folder_id(folder_id))
+		return true;
+
 	const string &redirect_xattr = rw ? r->write_xattr : r->read_xattr;
 	if (redirect_xattr.empty())
 		return true;
@@ -447,7 +465,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 // This value cannot be used for *at() syscalls!!!
 #define AT_PROCFD (AT_FDCWD - 1)
 
-static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath)
+static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath,
+	uint64_t folder_id = 0)
 {
 	char procname[64];
 	sprintf(procname, "/proc/self/fd/%i", dirfd);
@@ -466,7 +485,7 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	int prefix = fs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
 	    !memcmp(fs.source.c_str(), linkname, prefix) &&
-	    should_redirect_fd(dirfd, procname, op)) {
+	    should_redirect_fd(dirfd, procname, op, folder_id)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << op_name(op) << "(" << name << ")"
 				<< " @ " << dirfd << " |=> ." << linkname + prefix << endl;
@@ -499,7 +518,7 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	return path;
 }
 
-static int check_safe_fd(int fd, int dirfd, int flags)
+static int check_safe_fd(int fd, int dirfd, int flags, uint64_t folder_id)
 {
 	auto redirected = (dirfd == AT_FDCWD);
 	if (redirected)
@@ -515,7 +534,7 @@ static int check_safe_fd(int fd, int dirfd, int flags)
 
 	// Check that file is still not a stub after lock
 	enum op op = (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
-	if (!should_redirect_fd(fd, NULL, op))
+	if (!should_redirect_fd(fd, NULL, op, folder_id))
 		return 0;
 
 	cerr << "INFO: file open raced with evict." << endl;
@@ -1588,7 +1607,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (check_safe_fd(fd, dirfd, fi->flags) == -1) {
+	if (check_safe_fd(fd, dirfd, fi->flags, inode_p.folder_id()) == -1) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
@@ -1652,13 +1671,13 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	   with O_PATH (so it doesn't allow read/write access). */
 	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
 	string path;
-	auto dirfd = get_fd_path_at(inode.fd, "", op, path);
+	auto dirfd = get_fd_path_at(inode.fd, "", op, path, inode.folder_id());
 	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (check_safe_fd(fd, dirfd, fi->flags) == -1) {
+	if (check_safe_fd(fd, dirfd, fi->flags, inode.folder_id()) == -1) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
@@ -2130,6 +2149,9 @@ static Redirect *read_config_file()
 			redirect->set_op(OP_OPEN_RO);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
+			redirect->set_op(OP_OPEN_RW);
+		} else if (name == "redirect_write_folder_id") {
+			redirect->set_folder_id(value);
 			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
