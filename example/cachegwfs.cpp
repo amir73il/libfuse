@@ -405,7 +405,7 @@ struct xfs_fh {
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool should_redirect_fd(const char *procname, enum op op)
+static bool should_redirect_fd(int fd, const char *procname, enum op op)
 {
 	if (fs.redirect_all)
 		return true;
@@ -426,7 +426,12 @@ static bool should_redirect_fd(const char *procname, enum op op)
 	if (redirect_xattr.empty())
 		return true;
 
-	return getxattr(procname, redirect_xattr.c_str(), NULL, 0) > 0;
+	ssize_t res;
+	if (procname)
+		res = getxattr(procname, redirect_xattr.c_str(), NULL, 0);
+	else
+		res = fgetxattr(fd, redirect_xattr.c_str(), NULL, 0);
+	return res > 0;
 }
 
 // Convert <dirfd+name> for system calls that take an O_PATH fd.
@@ -460,7 +465,7 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	int prefix = fs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
 	    !memcmp(fs.source.c_str(), linkname, prefix) &&
-	    should_redirect_fd(procname, op)) {
+	    should_redirect_fd(dirfd, procname, op)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << op_name(op) << "(" << name << ")"
 				<< " @ " << dirfd << " |=> ." << linkname + prefix << endl;
@@ -491,6 +496,30 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	string path;
 	(void)get_fd_path_at(fd, "", op, path);
 	return path;
+}
+
+static int check_safe_fd(int fd, int dirfd, int flags)
+{
+	auto redirected = (dirfd == AT_FDCWD);
+	if (redirected)
+		return 0;
+
+	// cachegw manager takes an exclusive lock before making file a stub
+	if (flock(fd, LOCK_SH | LOCK_NB) == -1) {
+		auto saverr = errno;
+		cerr << "INFO: file is locked for read/write access." << endl;
+		errno = saverr;
+		return -1;
+	}
+
+	// Check that file is still not a stub after lock
+	enum op op = (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	if (!should_redirect_fd(fd, NULL, op))
+		return 0;
+
+	cerr << "INFO: file open raced with evict." << endl;
+	errno = EAGAIN;
+	return -1;
 }
 
 static uint32_t xfs_bulkstat_gen(__u64 ino)
@@ -624,7 +653,6 @@ struct FileHandle {
 
 struct File : public FileHandle {
 	int _fd {-1};
-	const bool redirected;
 
 	int get_fd() override { return _fd; };
 
@@ -632,12 +660,7 @@ struct File : public FileHandle {
 	File(const File&) = delete;
 	File& operator=(const File&) = delete;
 
-	File(int fd, int dirfd) : _fd(fd), redirected(dirfd == AT_FDCWD) {
-		// cachegw manager takes an exclusive lock before making file a stub
-		if (!redirected && flock(fd, LOCK_SH | LOCK_NB) == -1) {
-			_fd = -errno;
-			cerr << "INFO: file is locked for read/write access." << endl;
-		}
+	File(int fd) : _fd(fd) {
 		if (fs.debug)
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
 	}
@@ -1548,11 +1571,15 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
+	if (check_safe_fd(fd, dirfd, fi->flags) == -1) {
+		fuse_reply_fd_err(req, errno);
+		close(fd);
+		return;
+	}
 
-	auto fh = new (nothrow) File(fd, dirfd);
-	if (fh == nullptr || fh->_fd < 0) {
-		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
-		delete fh;
+	auto fh = new (nothrow) File(fd);
+	if (!fh) {
+		fuse_reply_err(req, ENOMEM);
 		close(fd);
 		return;
 	}
@@ -1611,13 +1638,18 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	auto dirfd = get_fd_path_at(inode.fd, "", op, path);
 	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
 	if (fd == -1) {
+		fuse_reply_fd_err(req, errno);
+		return;
+	}
+	if (check_safe_fd(fd, dirfd, fi->flags) == -1) {
+		fuse_reply_fd_err(req, errno);
+		close(fd);
 		return;
 	}
 
-	auto fh = new (nothrow) File(fd, dirfd);
-	if (fh == nullptr || fh->_fd < 0) {
-		fuse_reply_err(req, fh ? -fh->_fd : ENOMEM);
-		delete fh;
+	auto fh = new (nothrow) File(fd);
+	if (!fh) {
+		fuse_reply_err(req, ENOMEM);
 		close(fd);
 		return;
 	}
