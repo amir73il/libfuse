@@ -2200,15 +2200,14 @@ int main(int argc, char *argv[]) {
 
 	// Auto detect xfs with -o inode32 (or ext4)
 	fs.ino32 = xfs_fh.is_ino32();
+	if (!fs.ino32 && !xfs_fh.is_ino64())
+		errx(1, "ERROR: source filesystem type not supported");
 	// bulkstat support is an indication of xfs
 	fs.bulkstat = xfs_bulkstat_gen(fs.root->src_ino);
-	if (!fs.bulkstat) {
-		if (errno == EPERM)
-			errx(1, "ERROR: insufficient privileges");
-		if (!fs.ino32)
-			errx(1, "ERROR: source filesystem type not supported");
-	}
-	cout << "source filesystem looks like " << (fs.bulkstat ? "xfs" : "ext4")
+	if (!fs.bulkstat && errno == EPERM)
+		errx(1, "ERROR: insufficient privileges");
+	cout << "source filesystem looks like "
+		<< ((fs.bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
 		<< " -o inode" << (fs.ino32 ? "32" : "64") << endl;
 
 	// Initialize fuse
