@@ -167,6 +167,7 @@ enum op {
 	OP_GETXATTR,
 	OP_SETXATTR,
 	OP_OTHER,
+	OP_ALL,
 };
 
 const std::map<enum op, const char *> op_names = {
@@ -187,6 +188,7 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_UNLINK, "unlink" },
 	{ OP_GETXATTR, "getxattr" },
 	{ OP_SETXATTR, "setxattr" },
+	{ OP_ALL, "all" },
 };
 static const char *op_name(enum op op) {
 	auto iter = op_names.find(op);
@@ -284,9 +286,8 @@ struct Fs {
 	}
 	bool redirect_op(enum op op) {
 		auto r = redirect();
-		return redirect_all || op == OP_REDIRECT || r->test_op(op);
+		return op == OP_REDIRECT || r->test_op(OP_ALL) || r->test_op(op);
 	}
-	bool redirect_all{false};
 
 private:
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
@@ -423,7 +424,7 @@ struct xfs_fh {
 static bool should_redirect_fd(int fd, const char *procname, enum op op,
 				uint64_t folder_id)
 {
-	if (fs.redirect_all)
+	if (fs.redirect_op(OP_ALL))
 		return true;
 
 	if (!fs.redirect_op(op))
@@ -2058,9 +2059,6 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		exit(2);
 	}
 
-	fs.redirect_all = options.count("redirect");
-	if (options.count("debug"))
-		fs.debug = true;
 	fs.nosplice = options.count("nosplice") != 0;
 	if (options.count("nocache") == 0)
 		fs.wbcache = options.count("wbcache") != 0;
@@ -2123,7 +2121,8 @@ static Redirect *read_config_file()
 
 	std::ifstream cFile(fs.config_file);
 	if (!cFile.is_open()) {
-		cerr << "ERROR: Open config file failed." << endl;
+		if (fs.config_file != CONFIG_FILE)
+			cerr << "ERROR: Failed to open config file " << fs.config_file << endl;
 		return nullptr;
 	}
 
@@ -2203,9 +2202,14 @@ int main(int argc, char *argv[]) {
 	auto options {parse_options(argc, argv)};
 
 	// Read defaults from config file
-	(void)fs.redirect();
+	auto r = fs.redirect();
 	// Re-load config file on SIGHUP
 	set_signal_handler();
+	// These mount option settings are cleared on config file reload
+	if (options.count("redirect"))
+		r->set_op(OP_ALL);
+	if (options.count("debug"))
+		fs.debug = true;
 
 	// We need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
