@@ -152,7 +152,6 @@ enum op {
 	OP_OPEN_RO,
 	OP_OPEN_RW,
 	OP_STATFS,
-	OP_CREATE,
 	OP_CHMOD,
 	OP_CHOWN,
 	OP_TRUNCATE,
@@ -175,7 +174,6 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_OPEN_RW, "open_rw" },
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
-	{ OP_CREATE, "create" },
 	{ OP_CHMOD, "chmod" },
 	{ OP_CHOWN, "chown" },
 	{ OP_TRUNCATE, "truncate" },
@@ -519,6 +517,11 @@ static string get_fd_path(int fd, enum op op = OP_OTHER)
 	return path;
 }
 
+static enum op redirect_open_op(int flags)
+{
+	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+}
+
 static int check_safe_fd(int fd, int dirfd, int flags, uint64_t folder_id)
 {
 	auto redirected = (dirfd == AT_FDCWD);
@@ -534,7 +537,7 @@ static int check_safe_fd(int fd, int dirfd, int flags, uint64_t folder_id)
 	}
 
 	// Check that file is still not a stub after lock
-	enum op op = (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	enum op op = redirect_open_op(flags);
 	if (!should_redirect_fd(fd, NULL, op, folder_id))
 		return 0;
 
@@ -1590,7 +1593,8 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 
 static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode, int &dirfd) {
 	string path;
-	dirfd = get_fd_path_at(fd, name, OP_CREATE, path);
+	enum op op = redirect_open_op(flags);
+	dirfd = get_fd_path_at(fd, name, op, path);
 	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
 		});
@@ -1670,7 +1674,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
-	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	enum op op = redirect_open_op(fi->flags);
 	string path;
 	auto dirfd = get_fd_path_at(inode.fd, "", op, path, inode.folder_id());
 	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
