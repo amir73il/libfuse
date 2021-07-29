@@ -186,9 +186,9 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
+@pytest.mark.parametrize("redirect", ('', 'all', 'open_rw'))
 @pytest.mark.parametrize("name", ('passthrough_hp', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
-@pytest.mark.parametrize("redirect", (False, True))
 def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
@@ -197,13 +197,17 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
               [ pjoin(basename, 'example', name),
                 src_dir, mnt_dir ]
 
-    if redirect:
-        if name != 'cachegwfs':
-            pytest.skip('example does not support path redirect')
-        cmdline.append('--redirect')
-
     if name == 'cachegwfs':
         cmdline.append('--debug')
+        if redirect:
+            config_file = 'cachegwfs.config'
+            with open(config_file, 'w') as fh:
+                fh.write('redirect_op=' + redirect)
+            # Redirect dirfd relative paths to full src_dir paths
+            cmdline.append(src_dir)
+            cmdline.append(config_file)
+    elif redirect:
+        pytest.skip('example does not support path redirect')
 
     if not cache:
         cmdline.append('--nocache')
