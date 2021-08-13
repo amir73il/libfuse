@@ -151,6 +151,8 @@ enum op {
 	OP_REDIRECT, // Force redirect
 	OP_OPEN_RO,
 	OP_OPEN_RW,
+	OP_OPENDIR,
+	OP_LOOKUP,
 	OP_STATFS,
 	OP_CHMOD,
 	OP_CHOWN,
@@ -172,6 +174,8 @@ enum op {
 const std::map<enum op, const char *> op_names = {
 	{ OP_OPEN_RO, "open_ro" },
 	{ OP_OPEN_RW, "open_rw" },
+	{ OP_OPENDIR, "opendir" },
+	{ OP_LOOKUP, "lookup" },
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CHMOD, "chmod" },
@@ -429,7 +433,7 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 		return false;
 
 	bool rw;
-	if (op == OP_OPEN_RO)
+	if (op == OP_OPEN_RO || op == OP_OPENDIR || op == OP_LOOKUP)
 		rw = false;
 	else if (op == OP_OPEN_RW)
 		rw = true;
@@ -862,7 +866,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		// and lookup child in redirect path before lookup in source path
 		// to trigger populate of place holder directory
 		string path;
-		int dirfd = get_fd_path_at(parent.fd, name, OP_OPEN_RO, path);
+		int dirfd = get_fd_path_at(parent.fd, name, OP_LOOKUP, path);
 		if (dirfd != parent.fd &&
 		    faccessat(dirfd, path.c_str(), F_OK, AT_SYMLINK_NOFOLLOW)) {
 			return errno;
@@ -1426,7 +1430,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	}
 
 	string path;
-	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPEN_RO, path);
+	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPENDIR, path);
 	auto fd = openat(dirfd, path.c_str(), O_RDONLY);
 	if (fd == -1)
 		goto out_errno;
@@ -2150,6 +2154,8 @@ static Redirect *read_config_file()
 		} else if (name == "redirect_read_xattr") {
 			redirect->read_xattr = value;
 			redirect->set_op(OP_OPEN_RO);
+			redirect->set_op(OP_OPENDIR);
+			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
 			redirect->set_op(OP_OPEN_RW);
