@@ -188,7 +188,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("redirect", ('', 'all', 'open_rw'))
+@pytest.mark.parametrize("redirect", ('', 'all', 'open_rw', 'open_ro'))
 @pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
 def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):

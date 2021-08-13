@@ -66,6 +66,7 @@ enum op {
 	OP_GETATTR,
 	OP_OPEN_RO,
 	OP_OPEN_RW,
+	OP_OPENDIR,
 	OP_STATFS,
 	OP_CHMOD,
 	OP_CHOWN,
@@ -88,6 +89,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_GETATTR, "getattr" },
 	{ OP_OPEN_RO, "open_ro" },
 	{ OP_OPEN_RW, "open_rw" },
+	{ OP_OPENDIR, "opendir" },
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CHMOD, "chmod" },
@@ -190,7 +192,7 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 		return false;
 
 	bool rw;
-	if (op == OP_OPEN_RO || op == OP_LOOKUP)
+	if (op == OP_OPEN_RO || op == OP_OPENDIR || op == OP_LOOKUP)
 		rw = false;
 	else if (op == OP_OPEN_RW)
 		rw = true;
@@ -385,7 +387,7 @@ static int cgwfs_unlink(const fuse_path_at &in)
 
 static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 {
-	auto out = get_fd_path_op(in, OP_OPEN_RO);
+	auto out = get_fd_path_op(in, OP_OPENDIR);
 	return next_op(opendir)(out, fi);
 }
 
@@ -670,6 +672,7 @@ static Redirect *read_config_file()
 		} else if (name == "redirect_read_xattr") {
 			redirect->read_xattr = value;
 			redirect->set_op(OP_OPEN_RO);
+			redirect->set_op(OP_OPENDIR);
 			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
