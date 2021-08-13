@@ -203,6 +203,7 @@ static const char *op_name(enum op op) {
 struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
+	std::string readdir_xattr;
 	vector<string> xattr_prefixes;
 	std::unordered_set<enum op> ops; // fs operations to redirect
 	std::unordered_set<uint64_t> folder_ids; // folder ids to redirect
@@ -432,8 +433,10 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 	if (!fs.redirect_op(op))
 		return false;
 
-	bool rw;
-	if (op == OP_OPEN_RO || op == OP_OPENDIR || op == OP_LOOKUP)
+	bool rw = false, is_dir = false;
+	if (op == OP_OPENDIR || op == OP_LOOKUP)
+		is_dir = true;
+	else if (op == OP_OPEN_RO)
 		rw = false;
 	else if (op == OP_OPEN_RW)
 		rw = true;
@@ -444,7 +447,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 	if (rw && folder_id && r->test_folder_id(folder_id))
 		return true;
 
-	const string &redirect_xattr = rw ? r->write_xattr : r->read_xattr;
+	const string &redirect_xattr = rw ? r->write_xattr :
+		(is_dir ? r->readdir_xattr : r->read_xattr);
 	if (redirect_xattr.empty())
 		return true;
 
@@ -2152,8 +2156,14 @@ static Redirect *read_config_file()
 		if (name == "debug") {
 			debug = std::stoi(value);
 		} else if (name == "redirect_read_xattr") {
+			// Implies also redirect_readdir_xattr
 			redirect->read_xattr = value;
+			redirect->readdir_xattr = value;
 			redirect->set_op(OP_OPEN_RO);
+			redirect->set_op(OP_OPENDIR);
+			redirect->set_op(OP_LOOKUP);
+		} else if (name == "redirect_readdir_xattr") {
+			redirect->readdir_xattr = value;
 			redirect->set_op(OP_OPENDIR);
 			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_write_xattr") {
