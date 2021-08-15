@@ -198,8 +198,18 @@ struct fd_guard {
 	}
 };
 
+enum {
+	ftype_unknown,
+	ftype_root,
+	ftype_dir,
+	ftype_regular,
+	ftype_symlink,
+	ftype_special,
+};
+
 struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
+	int _ftype {ftype_unknown};
 	ino_t src_ino {0};
 	uint32_t gen {0};
 	uint64_t nlookup {0};
@@ -221,6 +231,19 @@ struct Inode {
 		_fd = newfd._fd;
 		newfd._fd = -1;
 	}
+
+	void set_ftype(mode_t mode) {
+		if (S_ISDIR(mode))
+			_ftype = ftype_dir;
+		else if (S_ISREG(mode))
+			_ftype = ftype_regular;
+		else if (S_ISLNK(mode))
+			_ftype = ftype_symlink;
+		else
+			_ftype = ftype_special;
+	}
+	bool is_root() const { return _ftype == ftype_root; }
+	bool is_dir() const { return is_root() || _ftype == ftype_dir; }
 
 	~Inode() {
 		if (_fd > 0)
@@ -627,6 +650,8 @@ struct InodeRef {
 	int fd {-1}; // Short lived O_PATH fd
 	ino_t src_ino() const { return i->src_ino; }
 	uint64_t folder_id() const { return i->folder_id; }
+	bool is_root() const { return i->is_root(); }
+	bool is_dir() const { return i->is_dir(); }
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -981,7 +1006,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// If subdir name is not a decimal number, the folder id is 0.
 	// For all other inodes, it is inheritted from the parent.
 	uint64_t folder_id = parent.folder_id();
-	if (parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode)) {
+	auto is_folder_root = parent.is_root() && S_ISDIR(e->attr.st_mode);
+	if (is_folder_root) {
 		folder_id = strtoull(name, NULL, 10);
 		if (fs.debug && !folder_id)
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
@@ -1006,7 +1032,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		// Maybe update long lived fd and folder id if opened initially by handle
 		if (!inode.folder_id)
 			inode.folder_id = folder_id;
-		if (inode._fd == -1 && parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode))
+		if (inode._fd == -1 && is_folder_root)
 			inode.keepfd(newfd_g);
 		inode.nlookup++;
 	} else { // no existing inode
@@ -1015,11 +1041,12 @@ static int do_lookup(InodeRef& parent, const char *name,
 		   fs.mutex), but this is of no consequence because at this
 		   point no other thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
+		inode.set_ftype(e->attr.st_mode);
 		inode.src_ino = src_ino;
 		inode.gen = xfs_fh.gen;
 		inode.nlookup = 1;
 		inode.folder_id = folder_id;
-		if (parent.src_ino() == root_ino && S_ISDIR(e->attr.st_mode)) {
+		if (is_folder_root) {
 			// Hold long lived fd for subdirs of root
 			inode.keepfd(newfd_g);
 		} else {
@@ -2368,6 +2395,7 @@ int main(int argc, char *argv[]) {
 	if (!S_ISDIR(stat.st_mode))
 		errx(1, "ERROR: source is not a directory");
 	fs.src_dev = stat.st_dev;
+	fs.root->_ftype = ftype_root;
 	fs.root->src_ino = stat.st_ino;
 
 	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
