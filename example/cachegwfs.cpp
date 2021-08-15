@@ -67,7 +67,6 @@ enum op {
 	OP_OPEN_RO,
 	OP_OPEN_RW,
 	OP_STATFS,
-	OP_CREATE,
 	OP_CHMOD,
 	OP_CHOWN,
 	OP_TRUNCATE,
@@ -91,7 +90,6 @@ const map<enum op, const char *> op_names = {
 	{ OP_OPEN_RW, "open_rw" },
 	{ OP_SYMLINK, "symlink" },
 	{ OP_STATFS, "statfs" },
-	{ OP_CREATE, "create" },
 	{ OP_CHMOD, "chmod" },
 	{ OP_CHOWN, "chown" },
 	{ OP_TRUNCATE, "truncate" },
@@ -257,6 +255,11 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 	}
 }
 
+static enum op redirect_open_op(int flags)
+{
+	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+}
+
 static int check_safe_fd(fuse_file_info *fi)
 {
 	auto fd = get_file_fd(fi);
@@ -270,7 +273,7 @@ static int check_safe_fd(fuse_file_info *fi)
 	}
 
 	// Check that file is still not a stub after lock
-	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	enum op op = redirect_open_op(fi->flags);
 	if (!should_redirect_fd(fd, NULL, op))
 		return 0;
 
@@ -388,7 +391,8 @@ static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 
 static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 {
-	auto out = get_fd_path_op(in, OP_CREATE);
+	enum op op = redirect_open_op(fi->flags);
+	auto out = get_fd_path_op(in, op);
 	auto ret = next_op(create)(out, mode, fi);
 	if (ret)
 		return ret;
@@ -405,7 +409,7 @@ static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 
 static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 {
-	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	enum op op = redirect_open_op(fi->flags);
 	auto out = get_fd_path_op(in, op);
 	auto ret = next_op(open)(out, fi);
 	if (ret)
