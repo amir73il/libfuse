@@ -70,6 +70,7 @@
 #include <sys/fsuid.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <xfs/xfs.h>
 
 // C++ includes
@@ -1981,7 +1982,15 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 }
 #endif
 
-#ifdef HAVE_COPY_FILE_RANGE
+#ifndef HAVE_COPY_FILE_RANGE
+static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
+			      loff_t *off_out, size_t len, unsigned int flags)
+{
+	return syscall(__NR_copy_file_range, fd_in, off_in, fd_out,
+			off_out, len, flags);
+}
+#endif
+
 static void sfs_copy_file_range(fuse_req_t req,
 		fuse_ino_t, off_t off_in, struct fuse_file_info *fi_in,
 		fuse_ino_t, off_t off_out, struct fuse_file_info *fi_out,
@@ -1996,7 +2005,6 @@ static void sfs_copy_file_range(fuse_req_t req,
 	else
 		fuse_reply_write(req, res);
 }
-#endif
 
 
 static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
@@ -2037,9 +2045,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.listxattr = sfs_listxattr;
 	sfs_oper.removexattr = sfs_removexattr;
 #endif
-#ifdef HAVE_COPY_FILE_RANGE
 	sfs_oper.copy_file_range = sfs_copy_file_range;
-#endif
 }
 
 static void print_usage(char *prog_name) {
