@@ -55,6 +55,7 @@
 #include <errno.h>
 #include <ftw.h>
 #include <fuse_lowlevel.h>
+#include <fuse_helpers.h>
 #include <inttypes.h>
 #include <string.h>
 #include <sys/file.h>
@@ -694,12 +695,6 @@ out_errno:
     if (error == ENFILE || error == EMFILE)
         cerr << "ERROR: Reached maximum number of file descriptors." << endl;
     fuse_reply_err(req, error);
-}
-
-
-static bool is_dot_or_dotdot(const char *name) {
-    return name[0] == '.' &&
-           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
 }
 
 
