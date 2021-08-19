@@ -15,6 +15,7 @@
 #include "fuse_opt.h"
 #include "fuse_misc.h"
 #include "fuse_kernel.h"
+#include "fuse_helpers.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -3515,12 +3516,6 @@ static int fill_dir(void *dh_, const char *name, const struct stat *statp,
 			return 1;
 	}
 	return 0;
-}
-
-static int is_dot_or_dotdot(const char *name)
-{
-	return name[0] == '.' && (name[1] == '\0' ||
-				  (name[1] == '.' && name[2] == '\0'));
 }
 
 static int fill_dir_plus(void *dh_, const char *name, const struct stat *statp,
