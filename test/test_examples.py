@@ -188,9 +188,10 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module'))
+@pytest.mark.parametrize("redirect", (False, True))
+@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
-def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
+def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
     debug = cache # Piggy back debug on cache parameter
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
@@ -201,6 +202,13 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
 
     if not cache:
         cmdline.append('--nocache')
+
+    if name == 'cachegwfs':
+        debug = True
+        if redirect:
+            cmdline.append('--redirect')
+    elif redirect:
+        pytest.skip('example does not support path redirect')
 
     if debug:
         cmdline.append('--debug')
@@ -239,18 +247,19 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
         tst_link(mnt_dir)
         tst_truncate_path(mnt_dir)
         tst_truncate_fd(mnt_dir)
-        tst_open_unlink(mnt_dir)
+        if not redirect:
+            tst_open_unlink(mnt_dir)
 
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we
         # can't use it.
-        if not cache:
+        if not cache and not redirect:
             syscall_test_cmd = [ os.path.join(basename, 'test', 'test_syscalls'),
                              mnt_dir, ':' + src_dir ]
             # unlinked testfiles check fails without kernel fix
             # "fuse: fix illegal access to inode with reused nodeid"
             # so opt-in for this test from kernel 5.14
-            if LooseVersion(platform.release()) >= '5.14':
+            if debug or LooseVersion(platform.release()) >= '5.14':
                 syscall_test_cmd.append('-u')
             subprocess.check_call(syscall_test_cmd)
     except:
