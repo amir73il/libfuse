@@ -168,6 +168,7 @@ enum op {
 	OP_MKNOD,
 	OP_GETXATTR,
 	OP_SETXATTR,
+	OP_COPY,
 	OP_OTHER,
 	OP_ALL,
 };
@@ -191,6 +192,7 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_UNLINK, "unlink" },
 	{ OP_GETXATTR, "getxattr" },
 	{ OP_SETXATTR, "setxattr" },
+	{ OP_COPY, "copy" },
 	{ OP_ALL, "all" },
 };
 static const char *op_name(enum op op) {
@@ -2003,18 +2005,48 @@ static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
 #endif
 
 static void sfs_copy_file_range(fuse_req_t req,
-		fuse_ino_t, off_t off_in, struct fuse_file_info *fi_in,
-		fuse_ino_t, off_t off_out, struct fuse_file_info *fi_out,
+		fuse_ino_t ino_in, off_t off_in, struct fuse_file_info *fi_in,
+		fuse_ino_t ino_out, off_t off_out, struct fuse_file_info *fi_out,
 		size_t len, int flags)
 {
 	ssize_t res;
+	auto fd_in = get_file_fd(fi_in);
+	auto fd_out = get_file_fd(fi_out);
+	auto redirect = fs.redirect_op(OP_COPY);
 
-	res = copy_file_range(get_file_fd(fi_in), &off_in,
-			      get_file_fd(fi_out), &off_out, len, flags);
+	// We could check if fd_in or fd_out are already redirected
+	// and we could store the redirected fd in File struct, but
+	// for now we always open temp fds to redirect copy
+	if (redirect) {
+		InodeRef inode_in(get_inode(ino_in));
+		InodeRef inode_out(get_inode(ino_out));
+		if (inode_in.error(req) || inode_out.error(req))
+			return;
+
+		fd_in = do_open(inode_in, OP_COPY, O_RDONLY);
+		if (fd_in == -1) {
+			fuse_reply_fd_err(req, errno);
+			return;
+		}
+
+		fd_out = do_open(inode_out, OP_COPY, O_RDWR);
+		if (fd_out == -1) {
+			fuse_reply_fd_err(req, errno);
+			close(fd_in);
+			return;
+		}
+	}
+
+	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
 	if (res < 0)
 		fuse_reply_err(req, errno);
 	else
 		fuse_reply_write(req, res);
+
+	if (redirect) {
+		close(fd_in);
+		close(fd_out);
+	}
 }
 
 
