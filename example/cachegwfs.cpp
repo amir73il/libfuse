@@ -531,7 +531,7 @@ static enum op redirect_open_op(int flags)
 	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
 }
 
-static int check_safe_fd(int fd, int dirfd, int flags, uint64_t folder_id)
+static int check_safe_fd(int fd, int dirfd, enum op op, uint64_t folder_id)
 {
 	auto redirected = (dirfd == AT_FDCWD);
 	if (redirected)
@@ -546,7 +546,6 @@ static int check_safe_fd(int fd, int dirfd, int flags, uint64_t folder_id)
 	}
 
 	// Check that file is still not a stub after lock
-	enum op op = redirect_open_op(flags);
 	if (!should_redirect_fd(fd, NULL, op, folder_id))
 		return 0;
 
@@ -1600,9 +1599,9 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 }
 
 
-static int do_create(fuse_req_t req, int fd, const char *name, int flags, mode_t mode, int &dirfd) {
+static int do_create(fuse_req_t req, int fd, const char *name, enum op op,
+		     int flags, mode_t mode, int &dirfd) {
 	string path;
-	enum op op = redirect_open_op(flags);
 	dirfd = get_fd_path_at(fd, name, op, path);
 	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
@@ -1615,13 +1614,14 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	if (inode_p.error(req))
 		return;
 
+	enum op op = redirect_open_op(fi->flags);
 	int dirfd;
-	auto fd = do_create(req, inode_p.fd, name, fi->flags, mode, dirfd);
+	auto fd = do_create(req, inode_p.fd, name, op, fi->flags, mode, dirfd);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (check_safe_fd(fd, dirfd, fi->flags, inode_p.folder_id()) == -1) {
+	if (check_safe_fd(fd, dirfd, op, inode_p.folder_id()) == -1) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
@@ -1660,6 +1660,24 @@ static void sfs_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 }
 
 
+static int do_open(InodeRef &inode, enum op op, int flags)
+{
+	string path;
+	auto dirfd = get_fd_path_at(inode.fd, "", op, path, inode.folder_id());
+	auto fd = open(path.c_str(), flags & ~O_NOFOLLOW);
+	if (fd == -1)
+		return -1;
+
+	if (check_safe_fd(fd, dirfd, op, inode.folder_id()) == -1) {
+		auto saverr = errno;
+		close(fd);
+		errno = saverr;
+		return -1;
+	}
+
+	return fd;
+}
+
 static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	InodeRef inode(get_inode(ino));
 	if (inode.error(req))
@@ -1684,16 +1702,9 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
 	enum op op = redirect_open_op(fi->flags);
-	string path;
-	auto dirfd = get_fd_path_at(inode.fd, "", op, path, inode.folder_id());
-	auto fd = open(path.c_str(), fi->flags & ~O_NOFOLLOW);
+	auto fd = do_open(inode, op, fi->flags);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
-		return;
-	}
-	if (check_safe_fd(fd, dirfd, fi->flags, inode.folder_id()) == -1) {
-		fuse_reply_fd_err(req, errno);
-		close(fd);
 		return;
 	}
 
