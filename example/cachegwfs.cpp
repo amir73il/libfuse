@@ -262,6 +262,7 @@ struct Fs {
 	bool nosplice;
 	bool nocache;
 	bool wbcache;
+	bool rwpassthrough;
 	bool ino32 {false};
 	bool bulkstat {true};
 
@@ -752,6 +753,14 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 		conn->want |= FUSE_CAP_SPLICE_WRITE;
 	if (conn->capable & FUSE_CAP_SPLICE_READ && !fs.nosplice)
 		conn->want |= FUSE_CAP_SPLICE_READ;
+	if (fs.rwpassthrough) {
+		if (conn->capable & FUSE_CAP_PASSTHROUGH)
+			conn->want |= FUSE_CAP_PASSTHROUGH;
+		else
+			fs.rwpassthrough = false;
+	}
+	cout << "kernel read/write passthrough "
+		<< (fs.rwpassthrough ? "enabled" : "disabled" ) << endl;
 }
 
 
@@ -1644,6 +1653,15 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 	}
 
+	if (fs.rwpassthrough) {
+		int passthrough_fh = fuse_passthrough_enable(req, fd);
+		if (passthrough_fh > 0)
+			fi->passthrough_fh = passthrough_fh;
+		else if (fs.debug)
+			cerr << "DEBUG: fuse_passthrough_enable returned: "
+				<< passthrough_fh << endl;
+	}
+
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	fuse_reply_create(req, &e, fi);
 }
@@ -1715,6 +1733,15 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		fuse_reply_err(req, ENOMEM);
 		close(fd);
 		return;
+	}
+
+	if (fs.rwpassthrough) {
+		int passthrough_fh = fuse_passthrough_enable(req, fd);
+		if (passthrough_fh > 0)
+			fi->passthrough_fh = passthrough_fh;
+		else if (fs.debug)
+			cerr << "DEBUG: fuse_passthrough_enable returned: "
+				<< passthrough_fh << endl;
 	}
 
 	// TODO: implement "auto_cache" logic and/or invalidate file data cache
@@ -2119,6 +2146,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
+		("norwpassthrough", "Do not use pass-through mode for read/write")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -2143,6 +2171,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.nosplice = options.count("nosplice") != 0;
 	if (options.count("nocache") == 0)
 		fs.wbcache = options.count("wbcache") != 0;
+	fs.rwpassthrough = options.count("norwpassthrough") == 0;
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {
 		cerr << "realpath(" << argv[1] << ") failed: " << strerror(errno) << endl;
@@ -2346,7 +2375,7 @@ int main(int argc, char *argv[]) {
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
 			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "allow_other,default_permissions,fsname=cachegw,subtype=cachegw") ||
+			fuse_opt_add_arg(&args, "nosuid,nodev,allow_other,default_permissions,fsname=cachegw,subtype=cachegw") ||
 			(options.count("debug-fuse") && fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
@@ -2364,7 +2393,7 @@ int main(int argc, char *argv[]) {
 
 	// Mount and run main loop
 	struct fuse_loop_config loop_config;
-	loop_config.clone_fd = 0;
+	loop_config.clone_fd = 1;
 	loop_config.max_idle_threads = 10;
 	if (fuse_session_mount(se, argv[2]) != 0)
 		goto err_out3;
