@@ -195,7 +195,6 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
     debug = cache # Piggy back debug on cache parameter
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
-    index_dir = str(short_tmpdir.mkdir('index'))
 
     cmdline = base_cmdline + \
               [ pjoin(basename, 'example', name),
@@ -214,6 +213,7 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
             cmdline.append('--redirect_path=' + src_dir)
             cmdline.append('--config_file=' + config_file)
         if name == 'notifyfs':
+            index_dir = str(short_tmpdir.mkdir('index'))
             cmdline.append('--index_path=' + index_dir)
     elif redirect:
         pytest.skip('example does not support path redirect')
