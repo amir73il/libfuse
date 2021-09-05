@@ -52,6 +52,7 @@
 #include <iomanip>
 #include <atomic>
 #include <set>
+#include <unordered_map>
 
 #include "fuse_passthrough.h"
 #include "fuse_helpers.h"
@@ -305,6 +306,55 @@ static IndexState *get_index_state(ino_t ino, fuse_state_t &state,
 	return IDX_STATE(state);
 }
 
+#define MAX_PATH_DEPTH 100
+
+static bool index_parents(IndexState *idx)
+{
+	auto pidx = idx;
+	auto parent = idx->parent;
+	fuse_inode_state_t state;
+
+	// Walk back the chain of idx->parent states, indexing the
+	// ancestors, until hitting an ancestor with indexed path
+	unordered_map<ino_t, fuse_inode_state_t> ancestors;
+	while (parent) {
+		// Treat root as indexed path
+		if (parent == FUSE_ROOT_ID || pidx->test(IDX_PATH))
+			break;
+
+		// Test for loops and too deep path
+		if (ancestors.size() >= MAX_PATH_DEPTH ||
+		    ancestors.find(parent) != ancestors.end()) {
+			cerr << "ERROR: illegal ancestors path " << idx->parent
+				<< "...(" << ancestors.size()
+				<< ")..." << parent << endl;
+			return false;
+		}
+
+		pidx = get_index_state(parent, state, OP_RW);
+		if (!pidx || pidx->parent == parent || !pidx->test(IDX_SELF)) {
+			pidx = NULL;
+			break;
+		}
+
+		ancestors[parent] = state;
+		parent = pidx->parent;
+	}
+
+	if (!parent || !pidx) {
+		cerr << "ERROR: disconnected ancestors path " << idx->parent
+			<< "...(" << ancestors.size()
+			<< ")..." << parent << endl;
+		return false;
+	}
+
+	// Mark all ancestors indexed path
+	for (auto& [ino, state] : ancestors)
+		IDX_STATE(state)->set(IDX_PARENT);
+
+	return true;
+}
+
 // Check if dir and parents are indexed in change tracking snapshot
 static bool __index_path_at(const fuse_path_at &at, index_op op,
 			    const char *caller)
@@ -322,6 +372,10 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 	if (!idx)
 		return false;
 
+	auto rw = (op != OP_RO);
+	if (rw && !idx->test(IDX_PARENT) && index_parents(idx))
+		idx->set(IDX_PARENT);
+
 	if (nfyfs.debug())
 		cerr << "DEBUG: " << caller << "(" << at.path() << ")"
 			<< " inode " << inode.ino()
@@ -329,7 +383,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 
 	// Do not allow modifications to inode unless all path elements
 	// (all parent directories and self) are indexed or newer than index.
-	return (op == OP_RO) || idx->test(IDX_PATH);
+	return !rw || idx->test(IDX_PATH);
 }
 
 #define index_ro_path_at(at) index_path_at(at, OP_RO, EPERM)
