@@ -2118,9 +2118,13 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.copy_file_range = sfs_copy_file_range;
 }
 
-static void print_usage(char *prog_name) {
-	cout << "Usage: " << prog_name << " --help\n"
-		<< "       " << prog_name << " [options] <source> <mountpoint> [<redirect path> [<conf file>]]\n";
+static void print_usage(cxxopts::Options& parser, char *prog_name) {
+	cout << "\nUsage: " << prog_name << " [options] <source> <mountpoint>\n";
+	// Strip everything before the option list from the
+	// default help string.
+	auto help = parser.help({"", "fuse"});
+	std::cout << std::endl << " options:"
+		<< help.substr(help.find("\n\n") + 1, string::npos) << std::endl;
 }
 
 static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, char**& argv) {
@@ -2128,7 +2132,7 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 		return parser.parse(argc, argv);
 	} catch (cxxopts::option_not_exists_exception& exc) {
 		std::cout << argv[0] << ": " << exc.what() << std::endl;
-		print_usage(argv[0]);
+		print_usage(parser, argv[0]);
 		exit(2);
 	}
 }
@@ -2138,11 +2142,18 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 
 static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	cxxopts::Options opt_parser(argv[0]);
+	opt_parser.allow_unrecognised_options();
 	opt_parser.add_options()
 		("debug", "Enable filesystem debug messages")
-		("debug-fuse", "Enable libfuse debug messages")
 		("help", "Print help")
 		("redirect", "Redirect all operations")
+		("redirect_path", "Path to access tiered files",
+		 cxxopts::value<std::string>(), "PATH")
+		("config_file", "Config file reloaded on SIGHUP",
+		 cxxopts::value<std::string>()->default_value(CONFIG_FILE), "FILE");
+
+	opt_parser.add_options("fuse")
+		("debug-fuse", "Enable libfuse debug messages")
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
@@ -2154,17 +2165,12 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	auto options = parse_wrapper(opt_parser, argc, argv);
 
 	if (options.count("help")) {
-		print_usage(argv[0]);
-		// Strip everything before the option list from the
-		// default help string.
-		auto help = opt_parser.help();
-		std::cout << std::endl << "options:"
-			<< help.substr(help.find("\n\n") + 1, string::npos);
+		print_usage(opt_parser, argv[0]);
 		exit(0);
 
 	} else if (argc < 3) {
 		std::cout << argv[0] << ": invalid number of arguments\n";
-		print_usage(argv[0]);
+		print_usage(opt_parser, argv[0]);
 		exit(2);
 	}
 
@@ -2179,17 +2185,26 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	}
 	cout << "source is " << rp << endl;
 	fs.source = rp;
+
+	string redirect_path;
 	if (argc > 3) {
-		rp = realpath(argv[3], NULL);
-		if (!rp) {
-			cerr << "realpath(" << argv[3] << ") failed: " << strerror(errno) << endl;
-			exit(1);
-		}
-		cout << "redirect is " << rp << endl;
+		redirect_path = argv[3];
+	} else if (options.count("redirect_path")) {
+		redirect_path = options["redirect_path"].as<std::string>();
+	}
+	if (!redirect_path.empty()) {
+		rp = realpath(redirect_path.c_str(), NULL);
+		if (!rp)
+			err(1, "ERROR: realpath(\"%s\")", redirect_path.c_str());
+		cout << "redirect path is " << rp << endl;
 		fs.redirect_path = rp;
 	}
 
-	fs.config_file = std::string {argc > 4 ? argv[4] : CONFIG_FILE};
+	if (argc > 4)
+		fs.config_file = argv[4];
+	else
+		fs.config_file = options["config_file"].as<std::string>();
+	cout << "config file is " << fs.config_file << endl;
 
 	return options;
 }

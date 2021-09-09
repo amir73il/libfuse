@@ -204,8 +204,8 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
             with open(config_file, 'w') as fh:
                 fh.write('redirect_op=' + redirect + '\n')
             # Redirect dirfd relative paths to full src_dir paths
-            cmdline.append(src_dir)
-            cmdline.append(config_file)
+            cmdline.append('--redirect_path=' + src_dir)
+            cmdline.append('--config_file=' + config_file)
     elif redirect:
         pytest.skip('example does not support path redirect')
 
