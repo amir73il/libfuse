@@ -1545,8 +1545,12 @@ static int test_rename_dir(void)
 	rmdir(testdir2);
 	res = rename(testdir, testdir2);
 	if (res == -1) {
-		PERROR("rename");
 		cleanup_dir(testdir, testdir_files, 1);
+		// Skip test if filesystem does not support rename of directory
+		if (errno == EXDEV)
+			return 0;
+
+		PERROR("rename");
 		return -1;
 	}
 	res = check_nonexist(testdir);
@@ -1584,7 +1588,7 @@ static int test_rename_dir_loop(void)
 
 	char path[1280], path2[1280];
 	int err = 0;
-	int res;
+	int res, ret = -1;
 
 	start_test("rename dir loop");
 
@@ -1600,8 +1604,7 @@ static int test_rename_dir_loop(void)
 
 	res = rename(PATH("a"), PATH2("a"));
 	if (res == -1) {
-		PERROR("rename");
-		goto fail;
+		goto fail_rename_dir;
 	}
 
 	errno = 0;
@@ -1704,14 +1707,12 @@ static int test_rename_dir_loop(void)
 
 	res = rename(PATH("a/b"), PATH2("a/d"));
 	if (res == -1) {
-		PERROR("rename");
-		goto fail;
+		goto fail_rename_dir;
 	}
 
 	res = rename(PATH("a/d"), PATH2("a/b"));
 	if (res == -1) {
-		PERROR("rename");
-		goto fail;
+		goto fail_rename_dir;
 	}
 
 	res = mkdir(PATH("a/d"), 0755);
@@ -1722,14 +1723,12 @@ static int test_rename_dir_loop(void)
 
 	res = rename(PATH("a/b"), PATH2("a/d"));
 	if (res == -1) {
-		PERROR("rename");
-		goto fail;
+		goto fail_rename_dir;
 	}
 
 	res = rename(PATH("a/d"), PATH2("a/b"));
 	if (res == -1) {
-		PERROR("rename");
-		goto fail;
+		goto fail_rename_dir;
 	}
 
 	res = mkdir(PATH("a/d"), 0755);
@@ -1773,6 +1772,12 @@ static int test_rename_dir_loop(void)
 	success();
 	return 0;
 
+fail_rename_dir:
+	// Skip test if filesystem does not support rename of directory
+	if (errno == EXDEV)
+		ret = 0;
+	else
+		PERROR("rename");
 fail:
 	unlink(PATH("a/bar"));
 
@@ -1786,7 +1791,7 @@ fail:
 	cleanup_dir(testdir, testdir_files, 1);
 	rmdir(testdir);
 
-	return -1;
+	return ret;
 
 #undef PATH2
 #undef PATH
