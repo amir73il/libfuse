@@ -243,6 +243,8 @@ struct Redirect {
 	}
 };
 
+#define CONFIG_FILE "/etc/cachegwfs.conf"
+
 static Redirect *read_config_file();
 
 struct Fs {
@@ -256,7 +258,7 @@ struct Fs {
 	bool debug;
 	std::string source;
 	std::string redirect_path;
-	std::string config_file;
+	std::string config_file{CONFIG_FILE};
 	size_t blocksize;
 	dev_t src_dev;
 	bool nosplice;
@@ -2138,8 +2140,6 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 }
 
 
-#define CONFIG_FILE "/etc/cachegwfs.conf"
-
 static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	cxxopts::Options opt_parser(argv[0]);
 	opt_parser.allow_unrecognised_options();
@@ -2187,10 +2187,10 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.source = rp;
 
 	string redirect_path;
-	if (argc > 3) {
-		redirect_path = argv[3];
-	} else if (options.count("redirect_path")) {
+	if (options.count("redirect_path")) {
 		redirect_path = options["redirect_path"].as<std::string>();
+	} else if (argc > 3 && argv[3][0] != '-') {
+		redirect_path = argv[3];
 	}
 	if (!redirect_path.empty()) {
 		rp = realpath(redirect_path.c_str(), NULL);
@@ -2200,10 +2200,11 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		fs.redirect_path = rp;
 	}
 
-	if (argc > 4)
-		fs.config_file = argv[4];
-	else
+	if (options.count("config_file")) {
 		fs.config_file = options["config_file"].as<std::string>();
+	} else if (argc > 4 && argv[4][0] != '-') {
+		fs.config_file = argv[4];
+	}
 	cout << "config file is " << fs.config_file << endl;
 
 	return options;
