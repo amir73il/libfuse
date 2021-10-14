@@ -188,6 +188,8 @@ struct Inode {
 	ino_t src_ino {0};
 	uint32_t gen {0};
 	uint64_t nlookup {0};
+	// Allow each module to store/fetch state in inode
+	map<int, fuse_inode_state_t> module_state;
 	mutex m;
 
 	bool dead() { return !src_ino; }
@@ -394,6 +396,60 @@ struct InodeRef : fuse_inode {
 	bool is_special() const override {
 		return i->_ftype == ftype_special;
 	}
+	bool is_dead() const override { return i->dead(); }
+	bool is_root() const override { return i == fs.root; }
+
+	bool get_module_state(const fuse_passthrough_module &module,
+			      fuse_inode_state_t &state,
+			      fuse_fill_state_t filler,
+			      void *data) const override
+	{
+		lock_guard<mutex> g {i->m};
+		// Initialize a new state or update an existing state
+		if (filler) {
+			try {
+				auto &s = i->module_state[module.idx];
+				if (!filler(*this, s, data))
+					return false;
+			} catch (bad_alloc&) {
+				return false;
+			}
+		}
+
+		auto iter = i->module_state.find(module.idx);
+		if (iter == i->module_state.end())
+			return false;
+
+		state = iter->second;
+		return true;
+	}
+	bool set_module_state(const fuse_passthrough_module &module,
+			      fuse_inode_state_t state,
+			      bool excl) override
+	{
+		lock_guard<mutex> g {i->m};
+		auto iter = i->module_state.find(module.idx);
+		if (excl && iter != i->module_state.end())
+			return false;
+
+		try {
+			i->module_state[module.idx] = state;
+		} catch (bad_alloc&) {
+			return false;
+		}
+
+		return true;
+	}
+	bool clear_module_state(const fuse_passthrough_module &module) override
+	{
+		lock_guard<mutex> g {i->m};
+		auto iter = i->module_state.find(module.idx);
+		if (iter == i->module_state.end())
+			return false;
+
+		i->module_state.erase(module.idx);
+		return true;
+	}
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -403,12 +459,12 @@ struct InodeRef : fuse_inode {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(InodePtr inode) : i(inode)
+	InodeRef(InodePtr inode, bool openfd = true) : i(inode)
 	{
 		if (i->dead())
 			return;
 
-		fd = i->_fd;
+		fd = openfd ? i->_fd : 0;
 		if (fd == -1) {
 			fd = open_by_ino(inode);
 		}
@@ -453,6 +509,38 @@ static InodePtr get_inode(fuse_ino_t ino)
 		return fs.inodes[0];
 	}
 	return iter->second;
+}
+
+bool get_module_inode_state(const fuse_passthrough_module &module,
+			    fuse_ino_t ino, fuse_inode_state_t &state,
+			    fuse_fill_state_t filler, void *data)
+{
+	// Open a short lived O_PATH fd to be used by filler
+	InodeRef inode(get_inode(ino), !!filler);
+	if (inode.is_dead())
+		return false;
+
+	return inode.get_module_state(module, state, filler, data);
+}
+
+bool set_module_inode_state(const fuse_passthrough_module &module,
+			    fuse_ino_t ino, fuse_inode_state_t state, bool excl)
+{
+	InodeRef inode(get_inode(ino), false);
+	if (inode.is_dead())
+		return false;
+
+	return inode.set_module_state(module, state, excl);
+}
+
+bool clear_module_inode_state(const fuse_passthrough_module &module,
+			      fuse_ino_t ino)
+{
+	InodeRef inode(get_inode(ino), false);
+	if (inode.is_dead())
+		return false;
+
+	return inode.clear_module_state(module);
 }
 
 
