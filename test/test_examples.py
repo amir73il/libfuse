@@ -215,6 +215,10 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
         if name == 'notifyfs':
             index_dir = str(short_tmpdir.mkdir('index'))
             cmdline.append('--index_path=' + index_dir)
+            # All directories in the test are newer then index, so index also
+            # new directories in cache=False run for better test coverage
+            if not cache:
+                cmdline.append('--index_new')
     elif redirect:
         pytest.skip('example does not support path redirect')
 
