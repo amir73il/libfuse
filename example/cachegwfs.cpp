@@ -121,13 +121,20 @@ struct Redirect {
 	string write_xattr;
 	string readdir_xattr;
 	vector<string> xattr_prefixes;
-	set<enum op> ops; // fs operations to redirect
+	unordered_set<enum op> ops; // fs operations to redirect
+	unordered_set<uint64_t> folder_ids; // folder ids to redirect
 
 	bool test_op(enum op op) {
 		return ops.count(op) > 0;
 	}
 	void set_op(enum op op) {
 		ops.insert(op);
+	}
+	bool test_folder_id(uint64_t folder_id) {
+		return folder_ids.count(folder_id) > 0;
+	}
+	void set_folder_id(uint64_t folder_id) {
+		folder_ids.insert(folder_id);
 	}
 
 	void set_op(const string &name) {
@@ -139,6 +146,13 @@ struct Redirect {
 			set_op(it->first);
 		else
 			cerr << "WARNING: unknown redirect operation " << name << endl;
+	}
+	void set_folder_id(const string &name) {
+		uint64_t folder_id = strtoull(name.c_str(), NULL, 10);
+		if (folder_id)
+			folder_ids.insert(folder_id);
+		else
+			cerr << "WARNING: illegal redirect folder id " << name << endl;
 	}
 };
 
@@ -186,7 +200,8 @@ static CgwFs cgwfs{};
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
-static bool should_redirect_fd(int fd, const char *procname, enum op op)
+static bool should_redirect_fd(int fd, const char *procname, enum op op,
+			       uint64_t *folder_id)
 {
 	if (cgwfs.redirect_op(OP_ALL))
 		return true;
@@ -205,6 +220,9 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 		return true;
 
 	auto r = cgwfs.redirect();
+	if (rw && folder_id && r->test_folder_id(*folder_id))
+		return true;
+
 	const string &redirect_xattr = rw ? r->write_xattr :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
 	if (redirect_xattr.empty())
@@ -220,7 +238,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 
 // Convert <dirfd+name> to redirected path if @op is in redirect ops
 // and on open of a stub file or directory
-static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
+static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op,
+				   uint64_t *folder_id = NULL)
 {
 	__trace_fd_path_at(in, op_name(op));
 
@@ -241,7 +260,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 	int prefix = cgwfs.source.size();
 	if (redirect_op && prefix && n >= prefix &&
 	    !memcmp(cgwfs.source.c_str(), linkname, prefix) &&
-	    should_redirect_fd(dirfd, in.proc_path(), op)) {
+	    should_redirect_fd(dirfd, in.proc_path(), op, folder_id)) {
 		linkname[n] = 0;
 		auto outpath = cgwfs.redirect_path;
 		if (cgwfs.redirect_path.empty())
@@ -268,7 +287,7 @@ static enum op redirect_open_op(int flags)
 	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
 }
 
-static int check_safe_fd(fuse_file_info *fi)
+static int check_safe_fd(fuse_file_info *fi, uint64_t *folder_id)
 {
 	auto fd = get_file_fd(fi);
 
@@ -282,7 +301,7 @@ static int check_safe_fd(fuse_file_info *fi)
 
 	// Check that file is still not a stub after lock
 	enum op op = redirect_open_op(fi->flags);
-	if (!should_redirect_fd(fd, NULL, op))
+	if (!should_redirect_fd(fd, NULL, op, folder_id))
 		return 0;
 
 	cerr << "INFO: file open raced with evict." << endl;
@@ -456,15 +475,18 @@ static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 
 static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 {
+	fuse_inode_state_t state;
+	in.inode().get_module_state(cgwfs, state);
+
 	enum op op = redirect_open_op(fi->flags);
-	auto out = get_fd_path_op(in, op);
+	auto out = get_fd_path_op(in, op, get_folder_id(state));
 	auto ret = next_op(create)(out, mode, fi);
 	if (ret)
 		return ret;
 
 	// flock non-redirected fd
 	auto redirected = (out.dirfd() == AT_FDCWD && !out.follow());
-	if (!redirected && check_safe_fd(fi) == -1) {
+	if (!redirected && check_safe_fd(fi, get_folder_id(state)) == -1) {
 		release_file(fi);
 		return -1;
 	}
@@ -474,15 +496,18 @@ static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 
 static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 {
+	fuse_inode_state_t state;
+	in.inode().get_module_state(cgwfs, state);
+
 	enum op op = redirect_open_op(fi->flags);
-	auto out = get_fd_path_op(in, op);
+	auto out = get_fd_path_op(in, op, get_folder_id(state));
 	auto ret = next_op(open)(out, fi);
 	if (ret)
 		return ret;
 
 	// flock non-redirected fd
 	auto redirected = (out.dirfd() == AT_FDCWD && !out.follow());
-	if (!redirected && check_safe_fd(fi) == -1) {
+	if (!redirected && check_safe_fd(fi, get_folder_id(state)) == -1) {
 		release_file(fi);
 		return -1;
 	}
@@ -745,6 +770,9 @@ static Redirect *read_config_file()
 			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
+			redirect->set_op(OP_OPEN_RW);
+		} else if (name == "redirect_write_folder_id") {
+			redirect->set_folder_id(value);
 			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
