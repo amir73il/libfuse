@@ -207,6 +207,8 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
         debug = True
         if redirect:
             cmdline.append('--redirect')
+            # Redirect dirfd relative paths to full src_dir paths
+            cmdline.append('--redirect_path=' + src_dir)
     elif redirect:
         pytest.skip('example does not support path redirect')
 
