@@ -1664,6 +1664,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 				<< passthrough_fh << endl;
 	}
 
+	fi->noflush = !fs.wbcache;
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	fuse_reply_create(req, &e, fi);
 }
@@ -1749,6 +1750,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	// TODO: implement "auto_cache" logic and/or invalidate file data cache
 	// on FAN_MODIFY
 	fi->keep_cache = (fs.timeout != 0);
+	fi->noflush = (!fs.wbcache || op == OP_OPEN_RO);
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	fuse_reply_open(req, fi);
 }
