@@ -229,11 +229,14 @@ struct fuse_file_lock {
  * FOPEN_KEEP_CACHE: don't invalidate the data cache on open
  * FOPEN_NONSEEKABLE: the file is not seekable
  * FOPEN_CACHE_DIR: allow caching this directory
+ * FOPEN_NOFLUSH: don't flush data cache on every close
  */
 #define FOPEN_DIRECT_IO		(1 << 0)
 #define FOPEN_KEEP_CACHE	(1 << 1)
 #define FOPEN_NONSEEKABLE	(1 << 2)
 #define FOPEN_CACHE_DIR		(1 << 3)
+/*#define FOPEN_STREAM		(1 << 4)*/
+#define FOPEN_NOFLUSH		(1 << 5)
 
 /**
  * INIT request/reply flags

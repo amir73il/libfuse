@@ -842,6 +842,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
     Inode& inode = get_inode(e.ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen++;
+    fi->noflush = (fs.timeout == 0);
 
     if (fs.passthrough) {
         int passthrough_fh = fuse_passthrough_enable(req, fd);
@@ -903,6 +904,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     lock_guard<mutex> g {inode.m};
     inode.nopen++;
     fi->keep_cache = (fs.timeout != 0);
+    fi->noflush = (fs.timeout == 0 || (fi->flags & O_ACCMODE) == O_RDONLY);
     fi->fh = fd;
     if (fs.passthrough) {
         int passthrough_fh = fuse_passthrough_enable(req, fd);
