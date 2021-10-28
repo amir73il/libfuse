@@ -259,6 +259,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
+		("nokernpassthrough", "Do not use pass-through mode in kernel for read/write")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -286,6 +287,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	module.opts.nocache = options.count("nocache");
 	module.opts.timeout = module.opts.nocache ? 0 : 1.0;
 	module.opts.wbcache = !module.opts.nocache && options.count("wbcache");
+	module.opts.kernel_passthrough = !options.count("nokernpassthrough");
 
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {
@@ -316,7 +318,10 @@ int main(int argc, char *argv[]) {
 	if (fuse_opt_add_arg(&args, argv[0]) ||
 			fuse_opt_add_arg(&args, "-o") ||
 			fuse_opt_add_arg(&args, "allow_other,default_permissions") ||
-			(options.count("debug-fuse") && fuse_opt_add_arg(&args, "-odebug")))
+			(module.opts.kernel_passthrough &&
+			 fuse_opt_add_arg(&args, "-onosuid,nodev")) ||
+			(options.count("debug-fuse") &&
+			 fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
 	module.opts.source = module.source.c_str();

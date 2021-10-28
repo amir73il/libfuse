@@ -478,6 +478,16 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 		conn->want |= FUSE_CAP_SPLICE_WRITE;
 	if (conn->capable & FUSE_CAP_SPLICE_READ && !fs.opts.nosplice)
 		conn->want |= FUSE_CAP_SPLICE_READ;
+
+	// Check availability of kernel read/write passthrough feature
+	if (fs.opts.kernel_passthrough) {
+		if (conn->capable & FUSE_CAP_PASSTHROUGH)
+			conn->want |= FUSE_CAP_PASSTHROUGH;
+		else
+			fs.opts.kernel_passthrough = false;
+	}
+	cout << "INFO: kernel read/write passthrough "
+		<< (fs.opts.kernel_passthrough ? "enabled" : "disabled" ) << endl;
 }
 
 static int do_getattr(const fuse_path_at &at, struct stat *attr, fuse_file_info *fi)
@@ -1468,6 +1478,18 @@ static void pfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	fi->noflush = !fs.opts.wbcache;
+
+	if (fs.opts.kernel_passthrough &&
+	    fi->passthrough_read && fi->passthrough_write) {
+		auto fd = get_file_fd(fi);
+		auto passthrough_fh = fuse_passthrough_enable(req, fd);
+		if (passthrough_fh > 0)
+			fi->passthrough_fh = passthrough_fh;
+		else if (fs.debug())
+			cerr << "DEBUG: fuse_passthrough_enable returned: "
+				<< passthrough_fh << endl;
+	}
+
 	fuse_reply_create(req, &e, fi);
 }
 
@@ -1530,6 +1552,18 @@ static void pfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 	}
 	fi->keep_cache = !fs.opts.nocache;
 	fi->noflush = !fs.opts.wbcache;
+
+	if (fs.opts.kernel_passthrough &&
+	    fi->passthrough_read && fi->passthrough_write) {
+		auto fd = get_file_fd(fi);
+		auto passthrough_fh = fuse_passthrough_enable(req, fd);
+		if (passthrough_fh > 0)
+			fi->passthrough_fh = passthrough_fh;
+		else if (fs.debug())
+			cerr << "DEBUG: fuse_passthrough_enable returned: "
+				<< passthrough_fh << endl;
+	}
+
 	fuse_reply_open(req, fi);
 }
 
