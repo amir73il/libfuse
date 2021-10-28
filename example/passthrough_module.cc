@@ -260,6 +260,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
+		("nopassthrough", "Do not use pass-through mode in kernel for read/write")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -288,6 +289,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	module.opts.nocache = options.count("nocache");
 	module.opts.timeout = module.opts.nocache ? 0 : 1.0;
 	module.opts.wbcache = !module.opts.nocache && options.count("wbcache");
+	module.opts.kernel_passthrough = !options.count("nopassthrough");
 
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {
