@@ -485,9 +485,9 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	sprintf(procname, "/proc/self/fd/%i", dirfd);
 	char linkname[PATH_MAX];
 	int n = 0;
-	bool redirect_op = fs.redirect_op(op);
+	bool redirect = should_redirect_fd(dirfd, procname, op, folder_id);
 
-	if (fs.debug || redirect_op) {
+	if (fs.debug || redirect) {
 		n = readlink(procname, linkname, PATH_MAX);
 	}
 	if (n > 0 && fs.debug) {
@@ -496,9 +496,8 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 			<< " @ " << procname << " -> " << linkname << endl;
 	}
 	int prefix = fs.source.size();
-	if (redirect_op && prefix && n >= prefix &&
-	    !memcmp(fs.source.c_str(), linkname, prefix) &&
-	    should_redirect_fd(dirfd, procname, op, folder_id)) {
+	if (redirect && prefix && n >= prefix &&
+	    !memcmp(fs.source.c_str(), linkname, prefix)) {
 		if (fs.debug)
 			cerr << "DEBUG: redirect " << op_name(op) << "(" << name << ")"
 				<< " @ " << dirfd << " |=> ." << linkname + prefix << endl;
@@ -511,6 +510,13 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 			outpath.append("/");
 			outpath.append(name);
 		}
+		return AT_FDCWD;
+	} else if (redirect && prefix) {
+		// We need to redirect, but we don't know where to
+		// Return an invalid path so operation will fail
+		cerr << "ERROR: redirect " << op_name(op) << "(" << name << "): "
+			<< linkname << " not under " << fs.source << endl;
+		outpath = "";
 		return AT_FDCWD;
 	} else if (!*name) {
 		// No redirect - convert dirfd+"" to safe /proc/ path
