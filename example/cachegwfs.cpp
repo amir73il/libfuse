@@ -97,6 +97,90 @@ static_assert(sizeof(fuse_ino_t) >= sizeof(void*),
 static_assert(sizeof(fuse_ino_t) >= sizeof(uint64_t),
 		"fuse_ino_t must be at least 64 bits");
 
+#define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
+#define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
+#define FS_FILEID_INO32_GEN 1
+
+struct fid64 {
+	uint64_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct fid32 {
+	uint32_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct xfs_fh {
+	struct file_handle fh;
+	union {
+		struct fid64 fid;
+		struct fid32 fid32;
+	};
+
+	xfs_fh() {
+		// Initialize file handle buffer to detect -o inode64/inode32
+		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = 0;
+		fid.ino = fid.gen = 0;
+	}
+
+	xfs_fh(ino_t ino, uint32_t gen, bool ino32)
+	{
+		if (ino32)
+			init_fid32(ino, gen);
+		else
+			init_fid64(ino, gen);
+	}
+
+	void init_fid64(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode64
+		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = XFS_FILEID_INO64_GEN;
+		fid.ino = ino;
+		fid.gen = gen;
+	}
+
+	void init_fid32(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode32
+		fh.handle_bytes = sizeof(fid32);
+		fh.handle_type = FS_FILEID_INO32_GEN;
+		fid32.ino = ino;
+		fid32.gen = gen;
+	}
+
+	// FILEID_INO32_GEN could be xfs with -o inode32, ext4 or many other fs
+	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
+	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
+
+	bool decode()
+	{
+		if (is_ino64()) {
+			nodeid = fid.ino;
+			ino = fid.ino;
+			gen = fid.gen;
+			return true;
+		}
+
+		if (is_ino32()) {
+			// With 32bit ino, FUSE nodeid is encoded from
+			// 32bit src_ino and 32bit generation
+			nodeid = ((uint64_t)fid32.gen) << 32 | fid32.ino;
+			ino = fid32.ino;
+			gen = fid32.gen;
+			return true;
+		}
+
+		return false;
+	}
+
+	// These values are only valid after calling decode()
+	ino_t nodeid{0};
+	ino_t ino{0};
+	uint32_t gen{0};
+};
 
 struct fd_guard {
 	int _fd {-1};
@@ -342,91 +426,6 @@ struct Cred {
 	 FUSE_BUF_NO_SPLICE :			\
 	 static_cast<fuse_buf_copy_flags>(0))
 
-
-#define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
-#define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
-#define FS_FILEID_INO32_GEN 1
-
-struct fid64 {
-	uint64_t ino;
-	uint32_t gen;
-} __attribute__((packed));
-
-struct fid32 {
-	uint32_t ino;
-	uint32_t gen;
-} __attribute__((packed));
-
-struct xfs_fh {
-	struct file_handle fh;
-	union {
-		struct fid64 fid;
-		struct fid32 fid32;
-	};
-
-	xfs_fh() {
-		// Initialize file handle buffer to detect -o inode64/inode32
-		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = 0;
-		fid.ino = fid.gen = 0;
-	}
-
-	xfs_fh(ino_t ino, uint32_t gen, bool ino32)
-	{
-		if (ino32)
-			init_fid32(ino, gen);
-		else
-			init_fid64(ino, gen);
-	}
-
-	void init_fid64(ino_t ino, uint32_t gen)
-	{
-		// Construct xfs file handle from ino/gen for -o inode64
-		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = XFS_FILEID_INO64_GEN;
-		fid.ino = ino;
-		fid.gen = gen;
-	}
-
-	void init_fid32(ino_t ino, uint32_t gen)
-	{
-		// Construct xfs file handle from ino/gen for -o inode32
-		fh.handle_bytes = sizeof(fid32);
-		fh.handle_type = FS_FILEID_INO32_GEN;
-		fid32.ino = ino;
-		fid32.gen = gen;
-	}
-
-	// FILEID_INO32_GEN could be xfs with -o inode32, ext4 or many other fs
-	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
-	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
-
-	bool decode()
-	{
-		if (is_ino64()) {
-			nodeid = fid.ino;
-			ino = fid.ino;
-			gen = fid.gen;
-			return true;
-		}
-
-		if (is_ino32()) {
-			// With 32bit ino, FUSE nodeid is encoded from
-			// 32bit src_ino and 32bit generation
-			nodeid = ((uint64_t)fid32.gen) << 32 | fid32.ino;
-			ino = fid32.ino;
-			gen = fid32.gen;
-			return true;
-		}
-
-		return false;
-	}
-
-	// These values are only valid after calling decode()
-	ino_t nodeid{0};
-	ino_t ino{0};
-	ino_t gen{0};
-};
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
