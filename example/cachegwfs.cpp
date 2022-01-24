@@ -230,11 +230,8 @@ struct Inode {
 	Inode& operator=(Inode&& inode) = delete;
 	Inode& operator=(const Inode&) = delete;
 
-	void keepfd(fd_guard& newfd) {
-		// Upgrade short lived fd to long lived fd in inode cache
-		_fd = newfd._fd;
-		newfd._fd = -1;
-	}
+	void keepfd(fd_guard& newfd);
+	void closefd();
 
 	void set_ftype(mode_t mode) {
 		if (S_ISDIR(mode))
@@ -250,8 +247,7 @@ struct Inode {
 	bool is_dir() const { return is_root() || _ftype == ftype_dir; }
 
 	~Inode() {
-		if (_fd > 0)
-			close(_fd);
+		closefd();
 	}
 };
 
@@ -378,6 +374,8 @@ struct Fs {
 	bool rwpassthrough;
 	bool ino32 {false};
 	bool bulkstat {true};
+	atomic_ulong num_keepfd{0};
+	unsigned long max_keepfd{0};
 
 	Fs() {
 		// Initialize a dead inode
@@ -453,6 +451,27 @@ struct Cred {
 	 FUSE_BUF_NO_SPLICE :			\
 	 static_cast<fuse_buf_copy_flags>(0))
 
+
+// Called under inode.m lock
+void Inode::keepfd(fd_guard& newfd)
+{
+	// Check is not under fs lock. It's ok to pass max_keepfd a bit
+	if (fs.num_keepfd.load(memory_order_relaxed) >= fs.max_keepfd)
+		return;
+
+	// Upgrade short lived fd to long lived fd in inode cache
+	_fd = newfd._fd;
+	newfd._fd = -1;
+	fs.num_keepfd++;
+}
+
+void Inode::closefd()
+{
+	if (_fd > 0) {
+		close(_fd);
+		fs.num_keepfd--;
+	}
+}
 
 // Check if this is an empty place holder (a.k.a stub file).
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
@@ -987,6 +1006,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
 				<< "' is not a folder id." << endl;
 	}
+	// For non-dir looked up by name keep a long lived fd with connected path
+	auto is_connectable = parent.is_dir() && !S_ISDIR(e->attr.st_mode);
+	auto keepfd = is_folder_root || is_connectable;
 
 	// Use convenience reference to Inode
 	Inode &inode = *inode_ptr;
@@ -1012,7 +1034,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		// Maybe update long lived fd and folder id if opened initially by handle
 		if (!inode.folder_id)
 			inode.folder_id = folder_id;
-		if (inode._fd == -1 && is_folder_root)
+		if (inode._fd == -1 && keepfd)
 			inode.keepfd(newfd_g);
 		inode.nlookup++;
 	} else { // no existing inode
@@ -1025,7 +1047,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		inode.src_fh = xfs_fh;
 		inode.nlookup = 1;
 		inode.folder_id = folder_id;
-		if (is_folder_root) {
+		if (keepfd) {
 			// Hold long lived fd for subdirs of root
 			inode.keepfd(newfd_g);
 		} else {
@@ -2343,10 +2365,15 @@ static void maximize_fd_limit() {
 		warn("WARNING: getrlimit() failed with");
 		return;
 	}
+	fs.max_keepfd = lim.rlim_cur/2;
 	lim.rlim_cur = lim.rlim_max;
 	res = setrlimit(RLIMIT_NOFILE, &lim);
-	if (res != 0)
+	if (res != 0) {
 		warn("WARNING: setrlimit() failed with");
+		return;
+	}
+	fs.max_keepfd = lim.rlim_cur/2;
+	cout << "max keepfd = " << fs.max_keepfd << endl;
 }
 
 
