@@ -407,9 +407,16 @@ struct Fs {
 		return op == OP_REDIRECT || r->test_op(OP_ALL) || r->test_op(op);
 	}
 
+	void init_root();
+	int open_by_fh(InodePtr inode);
+	uint32_t xfs_bulkstat_gen(__u64 ino);
+
 private:
+	void get_root_fh(ino_t src_ino);
+
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
 	shared_ptr<Redirect> _redirect;
+	int _bulkstat_fd{-1};
 };
 static Fs fs{};
 
@@ -610,7 +617,7 @@ static int check_safe_fd(int fd, int dirfd, enum op op, uint64_t folder_id)
 	return -1;
 }
 
-static uint32_t xfs_bulkstat_gen(__u64 ino)
+uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 {
 	__s32 count = 0;
 	struct xfs_bstat bstat = { };
@@ -621,7 +628,10 @@ static uint32_t xfs_bulkstat_gen(__u64 ino)
 		.ocount = &count,
 	};
 
-	if (ioctl(fs.root->_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
+	if (_bulkstat_fd < 0)
+		_bulkstat_fd = open(source.c_str(), O_DIRECTORY | O_RDONLY);
+	if (_bulkstat_fd < 0 ||
+	    ioctl(_bulkstat_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
 		auto saverr = errno;
 		cerr << "INFO: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
 		errno = saverr;
@@ -629,7 +639,7 @@ static uint32_t xfs_bulkstat_gen(__u64 ino)
 		return 0;
 	}
 
-	if (fs.debug) {
+	if (debug) {
 		cerr << "DEBUG: xfs_bulkstat_gen(): ino=" << ino << ", count=" << count
 			<< ", bs_ino=" << bstat.bs_ino  << ", bs_gen=" << bstat.bs_gen <<  endl;
 	}
@@ -637,16 +647,63 @@ static uint32_t xfs_bulkstat_gen(__u64 ino)
 	return bstat.bs_gen;
 }
 
-static int open_by_fh(InodePtr inode)
+int Fs::open_by_fh(InodePtr inode)
 {
-	int fd = open_by_handle_at(fs.root->_fd, &inode->src_fh.fh, O_PATH);
+	int fd = open_by_handle_at(root->_fd, &inode->src_fh.fh, O_PATH);
 	if (fd < 0)
 		return fd;
 
-	if (fs.debug)
+	if (debug)
 		get_fd_path(fd);
 
 	return fd;
+}
+
+void Fs::get_root_fh(ino_t src_ino)
+{
+	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
+	root->_fd = open(source.c_str(), O_DIRECTORY | O_RDONLY);
+	if (root->_fd == -1)
+		err(1, "ERROR: open(\"%s\")", source.c_str());
+
+	int mount_id;
+	struct xfs_fh xfs_fh{};
+	auto ret = name_to_handle_at(root->_fd, "", &xfs_fh.fh, &mount_id,
+				     AT_EMPTY_PATH);
+	if (ret == -1)
+		err(1, "ERROR: name_to_handle_at(\"%s\")", source.c_str());
+
+	if (!xfs_fh.decode() || src_ino != xfs_fh.ino)
+		errx(1, "ERROR: source filesystem type not supported");
+
+	root->src_fh = xfs_fh;
+	root->src_fh.nodeid = FUSE_ROOT_ID;
+
+	// Auto detect xfs with -o inode32 (or ext4)
+	ino32 = xfs_fh.is_ino32();
+	// bulkstat support is an indication of xfs
+	bulkstat = xfs_bulkstat_gen(src_ino);
+	if (!bulkstat && errno == EPERM)
+		errx(1, "ERROR: insufficient privileges");
+	cout << "source filesystem looks like "
+		<< ((bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
+		<< " -o inode" << (ino32 ? "32" : "64") << endl;
+}
+
+void Fs::init_root()
+{
+	root.reset(new Inode());
+	root->nlookup = 9999;
+
+	struct stat stat;
+	auto ret = lstat(source.c_str(), &stat);
+	if (ret == -1)
+		err(1, "ERROR: failed to stat source (\"%s\")", source.c_str());
+	if (!S_ISDIR(stat.st_mode))
+		errx(1, "ERROR: source is not a directory");
+	src_dev = stat.st_dev;
+	root->_ftype = ftype_root;
+	get_root_fh(stat.st_ino);
 }
 
 // Short lived reference of inode to keep fd open
@@ -675,7 +732,7 @@ struct InodeRef {
 
 		fd = i->_fd;
 		if (fd == -1) {
-			fd = open_by_fh(inode);
+			fd = fs.open_by_fh(inode);
 		}
 		if (fd == -1) {
 			fd = -errno;
@@ -912,7 +969,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	int newfd;
 	if (strcmp(name, ".") == 0) {
-		newfd = open_by_fh(parent.i);
+		newfd = fs.open_by_fh(parent.i);
 	} else if (strcmp(name, "..") == 0) {
 		newfd = openat(parent.fd, name, O_PATH | O_NOFOLLOW);
 	} else {
@@ -1087,7 +1144,7 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 			fh.gen = parent >> 32;
 			fh.ino &= 0xffffffff;
 		} else if (fs.bulkstat) {
-			fh.gen = xfs_bulkstat_gen(parent);
+			fh.gen = fs.xfs_bulkstat_gen(parent);
 		}
 		// Reconstruct file handle from <ino;gen>
 		fh.encode(fs.ino32);
@@ -2398,48 +2455,11 @@ int main(int argc, char *argv[]) {
 	maximize_fd_limit();
 
 	// Initialize filesystem root
-	fs.root.reset(new Inode());
-	fs.root->nlookup = 9999;
+	fs.init_root();
 	fs.timeout = options.count("nocache") ? 0 : 1.0;
 
-	struct stat stat;
-	auto ret = lstat(fs.source.c_str(), &stat);
-	if (ret == -1)
-		err(1, "ERROR: failed to stat source (\"%s\")", fs.source.c_str());
-	if (!S_ISDIR(stat.st_mode))
-		errx(1, "ERROR: source is not a directory");
-	fs.src_dev = stat.st_dev;
-	fs.root->_ftype = ftype_root;
-	auto src_ino = stat.st_ino;
-
-	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
-	fs.root->_fd = open(fs.source.c_str(), O_DIRECTORY | O_RDONLY);
-	if (fs.root->_fd == -1)
-		err(1, "ERROR: open(\"%s\")", fs.source.c_str());
-
-	int mount_id;
-	struct xfs_fh xfs_fh{};
-	ret = name_to_handle_at(fs.root->_fd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
-	if (ret == -1)
-		err(1, "ERROR: name_to_handle_at(\"%s\")", fs.source.c_str());
-
-	if (!xfs_fh.decode() || src_ino != xfs_fh.ino)
-		errx(1, "ERROR: source filesystem type not supported");
-
-	fs.root->src_fh = xfs_fh;
-	fs.root->src_fh.nodeid = FUSE_ROOT_ID;
-
-	// Auto detect xfs with -o inode32 (or ext4)
-	fs.ino32 = xfs_fh.is_ino32();
-	// bulkstat support is an indication of xfs
-	fs.bulkstat = xfs_bulkstat_gen(src_ino);
-	if (!fs.bulkstat && errno == EPERM)
-		errx(1, "ERROR: insufficient privileges");
-	cout << "source filesystem looks like "
-		<< ((fs.bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
-		<< " -o inode" << (fs.ino32 ? "32" : "64") << endl;
-
 	// Initialize fuse
+	auto ret = -1;
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
 			fuse_opt_add_arg(&args, "-o") ||
