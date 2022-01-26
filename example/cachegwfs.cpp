@@ -99,22 +99,30 @@ static_assert(sizeof(fuse_ino_t) >= sizeof(uint64_t),
 
 #define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
 #define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
+#define XFS_FILEID_INO64_GEN_PARENT (2 | XFS_FILEID_TYPE_64FLAG)
 #define FS_FILEID_INO32_GEN 1
+#define FS_FILEID_INO32_GEN_PARENT 2
 
 struct fid64 {
 	uint64_t ino;
 	uint32_t gen;
+	uint64_t parent_ino;
+	uint32_t parent_gen;
 } __attribute__((packed));
 
 struct fid32 {
 	uint32_t ino;
 	uint32_t gen;
+	uint32_t parent_ino;
+	uint32_t parent_gen;
 } __attribute__((packed));
 
 struct fh_encoder {
 	virtual int ino_size() const = 0;
 	virtual ino_t ino(struct file_handle &fh) const = 0;
 	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t parent_ino(struct file_handle &fh) const = 0;
+	virtual uint32_t parent_gen(struct file_handle &fh) const = 0;
 	virtual ino_t nodeid(struct file_handle &fh) const = 0;
 	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
 	virtual ~fh_encoder() {}
@@ -130,6 +138,12 @@ static struct fid32_encoder : fh_encoder {
 	uint32_t gen(struct file_handle &fh) const override {
 		return ((struct fid32 *)fh.f_handle)->gen;
 	}
+	ino_t parent_ino(struct file_handle &fh) const override {
+		return ((struct fid32 *)fh.f_handle)->parent_ino;
+	}
+	uint32_t parent_gen(struct file_handle &fh) const override {
+		return ((struct fid32 *)fh.f_handle)->parent_gen;
+	}
 	ino_t nodeid(struct file_handle &fh) const override {
 		// With 32bit ino, FUSE nodeid is encoded from
 		// 32bit src_ino and 32bit generation
@@ -137,7 +151,7 @@ static struct fid32_encoder : fh_encoder {
 	}
 	void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const override {
 		// Construct xfs file handle from ino/gen for -o inode32
-		fh.handle_bytes = sizeof(struct fid32);
+		fh.handle_bytes = offsetof(struct fid32, parent_ino);
 		fh.handle_type = FS_FILEID_INO32_GEN;
 		((struct fid32 *)fh.f_handle)->ino = ino;
 		((struct fid32 *)fh.f_handle)->gen = gen;
@@ -154,12 +168,18 @@ static struct fid64_encoder : fh_encoder {
 	uint32_t gen(struct file_handle &fh) const override {
 		return ((struct fid64 *)fh.f_handle)->gen;
 	}
+	ino_t parent_ino(struct file_handle &fh) const override {
+		return ((struct fid64 *)fh.f_handle)->parent_ino;
+	}
+	uint32_t parent_gen(struct file_handle &fh) const override {
+		return ((struct fid64 *)fh.f_handle)->parent_gen;
+	}
 	ino_t nodeid(struct file_handle &fh) const override {
 		return ino(fh);
 	}
 	void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const override {
 		// Construct xfs file handle from ino/gen for -o inode64
-		fh.handle_bytes = sizeof(struct fid64);
+		fh.handle_bytes = offsetof(struct fid64, parent_ino);
 		fh.handle_type = XFS_FILEID_INO64_GEN;
 		((struct fid64 *)fh.f_handle)->ino = ino;
 		((struct fid64 *)fh.f_handle)->gen = gen;
@@ -186,8 +206,10 @@ struct xfs_fh {
 	const fh_encoder *get_encoder() const {
 		switch (fh.handle_type) {
 			case FS_FILEID_INO32_GEN:
+			case FS_FILEID_INO32_GEN_PARENT:
 				return &fid32_encoder;
 			case XFS_FILEID_INO64_GEN:
+			case XFS_FILEID_INO64_GEN_PARENT:
 				return &fid64_encoder;
 		}
 		return NULL;
@@ -390,6 +412,7 @@ struct Fs {
 	bool rwpassthrough;
 	bool ino32 {false};
 	bool bulkstat {true};
+	int at_connectable {0};
 	atomic_ulong num_keepfd{0};
 	unsigned long max_keepfd{0};
 
@@ -432,7 +455,7 @@ struct Fs {
 	uint32_t xfs_bulkstat_gen(__u64 ino);
 
 private:
-	void get_root_fh(ino_t src_ino);
+	bool get_root_fh(ino_t src_ino, bool connectable = true);
 
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
 	shared_ptr<Redirect> _redirect;
@@ -703,19 +726,35 @@ int Fs::open_by_fh(InodePtr inode)
 	return fd;
 }
 
-void Fs::get_root_fh(ino_t src_ino)
+// Flag used to request connectable file handle (requires a kernel patch)
+#ifndef AT_CONNECTABLE
+#define AT_CONNECTABLE         0x10000 /* Request a connectable file handle */
+#endif
+
+bool Fs::get_root_fh(ino_t src_ino, bool connectable)
 {
-	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
-	root->_fd = open(source.c_str(), O_DIRECTORY | O_RDONLY);
+	at_connectable = connectable ? AT_CONNECTABLE : 0;
+	// O_PATH mount fd is used as a hint to decode connectable file handles.
+	// Without kernel patch, open_by_file_handle() with O_PATH fd will fail.
+	root->_fd = open(source.c_str(), O_DIRECTORY |
+			(connectable ? O_PATH : O_RDONLY));
 	if (root->_fd == -1)
 		err(1, "ERROR: open(\"%s\")", source.c_str());
 
 	int mount_id;
 	struct xfs_fh xfs_fh{};
 	auto ret = name_to_handle_at(root->_fd, "", &xfs_fh.fh, &mount_id,
-				     AT_EMPTY_PATH);
-	if (ret == -1)
-		err(1, "ERROR: name_to_handle_at(\"%s\")", source.c_str());
+				     AT_EMPTY_PATH | at_connectable);
+	if (ret == -1) {
+		if (!connectable)
+			err(1, "ERROR: name_to_handle_at(\"%s\")", source.c_str());
+		// Maybe connectable fh not supported - retry with non-connectable
+		close(root->_fd);
+		return get_root_fh(src_ino, false);
+	}
+
+	cout << "connectable file handles "
+		<< (connectable ? "" : "not " ) << "supported" << endl;
 
 	encoder = xfs_fh.get_encoder();
 	if (!encoder)
@@ -735,6 +774,7 @@ void Fs::get_root_fh(ino_t src_ino)
 	cout << "source filesystem looks like "
 		<< ((bulkstat || !ino32) ? "xfs" : "ext4")
 		<< " -o inode" << (ino32 ? "32" : "64") << endl;
+	return true;
 }
 
 void Fs::init_root()
@@ -1045,7 +1085,8 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 	int mount_id;
 	struct xfs_fh xfs_fh{};
-	res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+	res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id,
+				AT_EMPTY_PATH | fs.at_connectable);
 	if (res == -1) {
 		auto saveerr = errno;
 		if (fs.debug)
@@ -1110,9 +1151,14 @@ static int do_lookup(InodeRef& parent, const char *name,
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
 				<< "' is not a folder id." << endl;
 	}
-	// For non-dir looked up by name keep a long lived fd with connected path
+	// For non-dir looked up by name, store parent fh if we can use it to open
+	// an fd with a connected path or keep a long lived fd with connected path
 	auto is_connectable = parent.is_dir() && !S_ISDIR(e->attr.st_mode);
-	auto keepfd = is_folder_root || is_connectable;
+	auto keepfd = is_folder_root;
+	if (is_connectable && !fs.at_connectable) {
+		is_connectable = false;
+		keepfd = true;
+	}
 
 	// Use convenience reference to Inode
 	Inode &inode = *inode_ptr;
@@ -1133,6 +1179,16 @@ static int do_lookup(InodeRef& parent, const char *name,
 				cerr << "DEBUG: lookup(): inode " << src_ino
 					<< " generation " << inode.gen()
 					<< " mismatch - reused inode." << endl;
+			inode.src_fh = xfs_fh;
+		}
+		// Update parent on lookup by name, because inode may have been moved
+		// or inode may have been reconnected after it was found by LOOKUP "."
+		if (is_connectable) {
+			if (fs.debug &&
+			    parent.ino() != fs.get_encoder()->parent_ino(xfs_fh.fh))
+                                cerr << "DEBUG: lookup(): inode " << src_ino
+                                        << " parent " << parent.ino()
+                                        << " updated." << endl;
 			inode.src_fh = xfs_fh;
 		}
 		// Maybe update long lived fd and folder id if opened initially by handle
@@ -1469,7 +1525,13 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	int olddirfd = get_fd_path_at(inode_p.fd, name, OP_RENAME, oldpath);
 	int newdirfd = get_fd_path_at(inode_np.fd, newname, OP_RENAME, newpath);
 	auto res = renameat(olddirfd, oldpath.c_str(), newdirfd, newpath.c_str());
-	fuse_reply_err(req, res == -1 ? errno : 0);
+	if (res == -1)
+		fuse_reply_err(req, errno);
+
+	// Lookup to update new parent in connectable file handle of moved inode
+	fuse_entry_param e;
+	auto err = do_lookup(inode_np, newpath.c_str(), &e);
+	fuse_reply_err(req, err);
 }
 
 
