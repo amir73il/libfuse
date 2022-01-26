@@ -111,74 +111,90 @@ struct fid32 {
 	uint32_t gen;
 } __attribute__((packed));
 
+struct fh_encoder {
+	virtual int ino_size() const = 0;
+	virtual ino_t ino(struct file_handle &fh) const = 0;
+	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t nodeid(struct file_handle &fh) const = 0;
+	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
+	virtual ~fh_encoder() {}
+};
+
+static struct fid32_encoder : fh_encoder {
+	int ino_size() const override {
+		return sizeof(uint32_t);
+	}
+	ino_t ino(struct file_handle &fh) const override {
+		return ((struct fid32 *)fh.f_handle)->ino;
+	}
+	uint32_t gen(struct file_handle &fh) const override {
+		return ((struct fid32 *)fh.f_handle)->gen;
+	}
+	ino_t nodeid(struct file_handle &fh) const override {
+		// With 32bit ino, FUSE nodeid is encoded from
+		// 32bit src_ino and 32bit generation
+		return ((uint64_t)gen(fh)) << 32 | ino(fh);
+	}
+	void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const override {
+		// Construct xfs file handle from ino/gen for -o inode32
+		fh.handle_bytes = sizeof(struct fid32);
+		fh.handle_type = FS_FILEID_INO32_GEN;
+		((struct fid32 *)fh.f_handle)->ino = ino;
+		((struct fid32 *)fh.f_handle)->gen = gen;
+	}
+} fid32_encoder;
+
+static struct fid64_encoder : fh_encoder {
+	int ino_size() const override {
+		return sizeof(uint64_t);
+	}
+	ino_t ino(struct file_handle &fh) const override {
+		return ((struct fid64 *)fh.f_handle)->ino;
+	}
+	uint32_t gen(struct file_handle &fh) const override {
+		return ((struct fid64 *)fh.f_handle)->gen;
+	}
+	ino_t nodeid(struct file_handle &fh) const override {
+		return ino(fh);
+	}
+	void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const override {
+		// Construct xfs file handle from ino/gen for -o inode64
+		fh.handle_bytes = sizeof(struct fid64);
+		fh.handle_type = XFS_FILEID_INO64_GEN;
+		((struct fid64 *)fh.f_handle)->ino = ino;
+		((struct fid64 *)fh.f_handle)->gen = gen;
+	}
+} fid64_encoder;
+
 struct xfs_fh {
 	struct file_handle fh;
 	union {
-		struct fid64 fid;
+		struct fid64 fid64;
 		struct fid32 fid32;
-	};
+	} fid;
 
 	xfs_fh() {
 		// Initialize file handle buffer to detect -o inode64/inode32
 		fh.handle_bytes = sizeof(fid);
 		fh.handle_type = 0;
-		fid.ino = fid.gen = 0;
+		memset((char *)&fid, 0, sizeof(fid));
 	}
 
-	// Reconstruct file handle buffer from <ino;gen>
-	// With ext4, this also works with gen 0 (for any)
-	void encode(bool ino32)
-	{
-		if (ino32)
-			init_fid32(ino, gen);
-		else
-			init_fid64(ino, gen);
-	}
-
-	void init_fid64(ino_t ino, uint32_t gen)
-	{
-		// Construct xfs file handle from ino/gen for -o inode64
-		fh.handle_bytes = sizeof(fid);
-		fh.handle_type = XFS_FILEID_INO64_GEN;
-		fid.ino = ino;
-		fid.gen = gen;
-	}
-
-	void init_fid32(ino_t ino, uint32_t gen)
-	{
-		// Construct xfs file handle from ino/gen for -o inode32
-		fh.handle_bytes = sizeof(fid32);
-		fh.handle_type = FS_FILEID_INO32_GEN;
-		fid32.ino = ino;
-		fid32.gen = gen;
-	}
-
+	// Return an fh encoder to use for the file_handle read from fs
 	// FILEID_INO32_GEN could be xfs with -o inode32, ext4 or many other fs
-	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
-	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
-
-	// Extract source <ino;gen> and FUSE ino from source file handle
-	bool decode()
-	{
-		if (is_ino64()) {
-			nodeid = fid.ino;
-			ino = fid.ino;
-			gen = fid.gen;
-			return true;
+	// XFS_FILEID_INO64_GEN is xfs specific
+	const fh_encoder *get_encoder() const {
+		switch (fh.handle_type) {
+			case FS_FILEID_INO32_GEN:
+				return &fid32_encoder;
+			case XFS_FILEID_INO64_GEN:
+				return &fid64_encoder;
 		}
-
-		if (is_ino32()) {
-			// With 32bit ino, FUSE nodeid is encoded from
-			// 32bit src_ino and 32bit generation
-			nodeid = ((uint64_t)fid32.gen) << 32 | fid32.ino;
-			ino = fid32.ino;
-			gen = fid32.gen;
-			return true;
-		}
-		return false;
+		return NULL;
 	}
 
-	// These values are only valid after calling decode()
+	// Either these values are decoded from fh by fs.decode()
+	// or fh buffer is encoded from these values by fs.encode()
 	ino_t nodeid{0};
 	ino_t ino{0};
 	uint32_t gen{0};
@@ -407,6 +423,10 @@ struct Fs {
 		return op == OP_REDIRECT || r->test_op(OP_ALL) || r->test_op(op);
 	}
 
+	const fh_encoder *get_encoder() const { return encoder; }
+	bool decode(xfs_fh &xfh);
+	bool encode(xfs_fh &xfh);
+
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
@@ -417,6 +437,7 @@ private:
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
 	shared_ptr<Redirect> _redirect;
 	int _bulkstat_fd{-1};
+	const fh_encoder *encoder{NULL};
 };
 static Fs fs{};
 
@@ -617,6 +638,29 @@ static int check_safe_fd(int fd, int dirfd, enum op op, uint64_t folder_id)
 	return -1;
 }
 
+// Extract source <ino;gen> and FUSE ino from source file handle
+bool Fs::decode(xfs_fh &xfh)
+{
+	if (!encoder || encoder != get_encoder())
+		return false;
+
+	xfh.nodeid = encoder->nodeid(xfh.fh);
+	xfh.ino = encoder->ino(xfh.fh);
+	xfh.gen = encoder->gen(xfh.fh);
+	return true;
+}
+
+// Construct file handle buffer from <ino;gen> for LOOKUP(".")
+bool Fs::encode(xfs_fh &xfh)
+{
+	if (!encoder)
+		return false;
+
+	encoder->encode(xfh.fh, xfh.ino, xfh.gen);
+	return true;
+}
+
+
 uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 {
 	__s32 count = 0;
@@ -673,20 +717,23 @@ void Fs::get_root_fh(ino_t src_ino)
 	if (ret == -1)
 		err(1, "ERROR: name_to_handle_at(\"%s\")", source.c_str());
 
-	if (!xfs_fh.decode() || src_ino != xfs_fh.ino)
+	encoder = xfs_fh.get_encoder();
+	if (!encoder)
 		errx(1, "ERROR: source filesystem type not supported");
+	if (!decode(xfs_fh) || src_ino != xfs_fh.ino)
+		errx(1, "ERROR: failed decoding root file handle");
 
 	root->src_fh = xfs_fh;
 	root->src_fh.nodeid = FUSE_ROOT_ID;
 
 	// Auto detect xfs with -o inode32 (or ext4)
-	ino32 = xfs_fh.is_ino32();
+	ino32 = (encoder->ino_size() == sizeof(uint32_t));
 	// bulkstat support is an indication of xfs
 	bulkstat = xfs_bulkstat_gen(src_ino);
 	if (!bulkstat && errno == EPERM)
 		errx(1, "ERROR: insufficient privileges");
 	cout << "source filesystem looks like "
-		<< ((bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
+		<< ((bulkstat || !ino32) ? "xfs" : "ext4")
 		<< " -o inode" << (ino32 ? "32" : "64") << endl;
 }
 
@@ -1020,7 +1067,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		// found root when reconnecting directory file handle, i.e. lookup(ino, "..")
 		e->ino = FUSE_ROOT_ID;
 		return 0;
-	} else if (!xfs_fh.decode()) {
+	} else if (!fs.decode(xfs_fh)) {
 		cerr << "WARNING: Source directory expected to be XFS or ext4." << endl;
 		return ENOTSUP;
 	} else if (src_ino != xfs_fh.ino) {
@@ -1147,7 +1194,7 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 			fh.gen = fs.xfs_bulkstat_gen(parent);
 		}
 		// Reconstruct file handle from <ino;gen>
-		fh.encode(fs.ino32);
+		fs.encode(fh);
 	} else {
 		inode_p = get_inode(parent);
 	}
