@@ -281,6 +281,7 @@ struct Inode {
 		else
 			_ftype = ftype_special;
 	}
+	bool is_symlink() const { return _ftype == ftype_symlink; }
 	bool is_root() const { return _ftype == ftype_root; }
 	bool is_dir() const { return is_root() || _ftype == ftype_dir; }
 
@@ -294,6 +295,7 @@ typedef shared_ptr<Inode> InodePtr;
 typedef std::map<ino_t, InodePtr> InodeMap;
 
 enum op {
+	OP_FD_PATH, // No redirect
 	OP_REDIRECT, // Force redirect
 	OP_OPEN_RO,
 	OP_OPEN_RW,
@@ -314,7 +316,6 @@ enum op {
 	OP_GETXATTR,
 	OP_SETXATTR,
 	OP_COPY,
-	OP_OTHER,
 	OP_ALL,
 };
 
@@ -529,6 +530,9 @@ void Inode::closefd()
 static bool should_redirect_fd(int fd, const char *procname, enum op op,
 				uint64_t folder_id)
 {
+	if (op == OP_FD_PATH)
+		return false;
+
 	if (fs.redirect_op(OP_ALL))
 		return true;
 
@@ -625,12 +629,11 @@ static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpa
 	}
 }
 
-// Convert fd to path for system calls that do not take an O_PATH fd
-static string get_fd_path(int fd, enum op op = OP_OTHER)
+// TODO: factor this out as helper to get_fd_path_at()
+static void print_fd_path(int fd)
 {
 	string path;
-	(void)get_fd_path_at(fd, "", op, path);
-	return path;
+	(void)get_fd_path_at(fd, "", OP_FD_PATH, path);
 }
 
 static enum op redirect_open_op(int flags)
@@ -721,7 +724,7 @@ int Fs::open_by_fh(InodePtr inode)
 		return fd;
 
 	if (debug)
-		get_fd_path(fd);
+		print_fd_path(fd);
 
 	return fd;
 }
@@ -801,6 +804,8 @@ struct InodeRef {
 	uint32_t gen() const { return i->gen(); }
 	ino_t nodeid() const { return i->nodeid(); }
 	uint64_t folder_id() const { return i->folder_id; }
+	bool is_redirected() const { return (dirfd == AT_FDCWD); }
+	bool is_symlink() const { return i->is_symlink(); }
 	bool is_root() const { return i->is_root(); }
 	bool is_dir() const { return i->is_dir(); }
 
@@ -842,10 +847,25 @@ struct InodeRef {
 		return err;
 	}
 
+	// Convert fd to path for system calls that do not take an O_PATH fd.
+	// May return a magic /proc symlink, so syscalls that use the returned
+	// path cannot use NOFOLLOW. To avoid unintended following of symlinks
+	// on redirected path, do not redirect opertions on symlink inodes.
+	const char *get_path(enum op op, bool follow = false) {
+		if (!follow && is_symlink())
+			op = OP_FD_PATH;
+		dirfd = get_fd_path_at(fd, "", op, path);
+		return path.c_str();
+	}
+
 	~InodeRef() {
 		if (fd > 0 && fd != i->_fd)
 			close(fd);
 	}
+
+private:
+	int dirfd{-1};
+	string path; // Either /proc magic symlink path or redirected path
 };
 
 static InodePtr get_inode(fuse_ino_t ino) {
@@ -970,14 +990,13 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 	if (inode.error(req))
 		return;
 
-	int ifd = inode.fd;
 	int res;
 
 	if (valid & FUSE_SET_ATTR_MODE) {
 		if (fi) {
 			res = fchmod(get_file_fd(fi), attr->st_mode);
 		} else {
-			res = chmod(get_fd_path(ifd, OP_CHMOD).c_str(), attr->st_mode);
+			res = chmod(inode.get_path(OP_CHMOD, true), attr->st_mode);
 		}
 		if (res == -1)
 			goto out_err;
@@ -986,7 +1005,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : NULL_UID;
 		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : NULL_GID;
 
-		res = fchownat(AT_FDCWD, get_fd_path(ifd, OP_CHOWN).c_str(), uid, gid, 0);
+		res = fchownat(AT_FDCWD, inode.get_path(OP_CHOWN), uid, gid, 0);
 		if (res == -1)
 			goto out_err;
 	}
@@ -994,7 +1013,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (fi) {
 			res = ftruncate(get_file_fd(fi), attr->st_size);
 		} else {
-			res = truncate(get_fd_path(ifd, OP_TRUNCATE).c_str(), attr->st_size);
+			res = truncate(inode.get_path(OP_TRUNCATE, true), attr->st_size);
 		}
 		if (res == -1)
 			goto out_err;
@@ -1021,7 +1040,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 			res = futimens(get_file_fd(fi), tv);
 		else {
 #ifdef HAVE_UTIMENSAT
-			res = utimensat(AT_FDCWD, get_fd_path(ifd, OP_UTIMENS).c_str(), tv, 0);
+			res = utimensat(AT_FDCWD, inode.get_path(OP_UTIMENS), tv, 0);
 #else
 			res = -1;
 			errno = EOPNOTSUPP;
@@ -1454,11 +1473,11 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int do_link(int fd, int dfd, const char *name) {
-	string path = get_fd_path(fd, OP_LINK);
+static int do_link(InodeRef &inode, int dfd, const char *name) {
+	auto path = inode.get_path(OP_LINK);
 	string newpath;
 	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
-	return linkat(AT_FDCWD, path.c_str(), newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
+	return linkat(AT_FDCWD, path, newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
 }
 
 
@@ -1473,7 +1492,7 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 	e.attr_timeout = fs.timeout;
 	e.entry_timeout = fs.timeout;
 
-	auto res = do_link(inode.fd, inode_p.fd, name);
+	auto res = do_link(inode, inode_p.fd, name);
 	if (res == -1) {
 		fuse_reply_err(req, errno);
 		return;
@@ -2029,9 +2048,8 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 }
 
 
-static int do_statfs(int fd, struct statvfs *stbuf) {
-	string path = get_fd_path(fd, OP_STATFS);
-	return statvfs(path.c_str(), stbuf);
+static int do_statfs(InodeRef &inode, struct statvfs *stbuf) {
+	return statvfs(inode.get_path(OP_STATFS, true), stbuf);
 }
 
 static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
@@ -2040,7 +2058,7 @@ static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
 		return;
 
 	struct statvfs stbuf;
-	auto res = do_statfs(inode.fd, &stbuf);
+	auto res = do_statfs(inode, &stbuf);
 	if (res == -1)
 		fuse_reply_err(req, errno);
 	else
@@ -2100,7 +2118,7 @@ static enum op redirect_xattr_op(enum op op, const char *name)
 static int do_getxattr(InodeRef& inode, const char *name, char *value,
 		size_t size) {
 	auto op = redirect_xattr_op(OP_GETXATTR, name);
-	return getxattr(get_fd_path(inode.fd, op).c_str(), name, value, size);
+	return getxattr(inode.get_path(op), name, value, size);
 }
 
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -2148,7 +2166,7 @@ out:
 
 
 static int do_listxattr(InodeRef& inode, char *value, size_t size) {
-	return listxattr(get_fd_path(inode.fd, OP_GETXATTR).c_str(), value, size);
+	return listxattr(inode.get_path(OP_GETXATTR), value, size);
 }
 
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
@@ -2196,7 +2214,7 @@ out:
 static int do_setxattr(InodeRef& inode, const char *name,
 		const char *value, size_t size, int flags) {
 	auto op = redirect_xattr_op(OP_SETXATTR, name);
-	return setxattr(get_fd_path(inode.fd, op).c_str(), name, value, size, flags);
+	return setxattr(inode.get_path(op), name, value, size, flags);
 }
 
 static void sfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -2224,7 +2242,7 @@ static void sfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
 	ssize_t ret;
 	int saverr;
 
-	ret = removexattr(get_fd_path(inode.fd, op).c_str(), name);
+	ret = removexattr(inode.get_path(op), name);
 	saverr = ret == -1 ? errno : 0;
 
 	fuse_reply_err(req, saverr);
