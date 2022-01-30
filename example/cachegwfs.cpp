@@ -1530,7 +1530,7 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 	// Lookup to update new parent in connectable file handle of moved inode
 	fuse_entry_param e;
-	auto err = do_lookup(inode_np, newpath.c_str(), &e);
+	auto err = do_lookup(inode_np, newname, &e);
 	fuse_reply_err(req, err);
 }
 
