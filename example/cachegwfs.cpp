@@ -1207,12 +1207,11 @@ static int do_lookup(InodeRef& parent, const char *name,
 		inode.src_fh = xfs_fh;
 		inode.nlookup = 1;
 		inode.folder_id = folder_id;
+		// Mark inode for open_by_handle
+		inode._fd = -1;
 		if (keepfd) {
 			// Hold long lived fd for subdirs of root
 			inode.keepfd(newfd_g);
-		} else {
-			// Mark inode for open_by_handle
-			inode._fd = -1;
 		}
 		fs_lock.unlock();
 
