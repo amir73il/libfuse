@@ -128,7 +128,7 @@ struct fuse_loop_config {
 	 * deletion overhead and performance may suffer. When set to 0, a new
 	 * thread will be created to service every operation.
 	 */
-	unsigned int max_idle_threads;
+	int max_idle_threads;
 };
 
 /**************************************************************************

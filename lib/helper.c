@@ -49,7 +49,7 @@ static const struct fuse_opt fuse_helper_opts[] = {
 	FUSE_OPT_KEY("subtype=",	FUSE_OPT_KEY_KEEP),
 #endif
 	FUSE_HELPER_OPT("clone_fd",	clone_fd),
-	FUSE_HELPER_OPT("max_idle_threads=%u", max_idle_threads),
+	FUSE_HELPER_OPT("max_idle_threads=%d", max_idle_threads),
 	FUSE_OPT_END
 };
 
