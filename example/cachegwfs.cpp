@@ -57,6 +57,7 @@
 
 #include "fuse_passthrough.h"
 #include "fuse_helpers.h"
+#include "notifyfs.h"
 
 using namespace std;
 
@@ -697,6 +698,10 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		("config_file", "Config file reloaded on SIGHUP",
 		 cxxopts::value<string>()->default_value(CONFIG_FILE), "FILE");
 
+	opt_parser.add_options("notifyfs")
+		("index_path", "Path to index directory",
+		 cxxopts::value<string>(), "PATH");
+
 	opt_parser.add_options("fuse")
 		("debug-fuse", "Enable libfuse debug messages")
 		("nocache", "Disable all caching")
@@ -899,11 +904,25 @@ int main(int argc, char *argv[])
 	// Don't apply umask, use modes exactly as specified
 	umask(0);
 
+	// cachegwfs or notifyfs?
+	const char *progname = argv[0];
+	const char *basename = strrchr(progname, '/');
+	if (basename == NULL)
+		basename = progname;
+	else if (basename[1] != '\0')
+		basename++;
+	string fsname(basename);
+	string fsnameopt("-ofsname=");
+	fsnameopt.append(fsname);
+	fsnameopt.append(",subtype=");
+	fsnameopt.append(fsname);
+	cout << "Starting " << fsname << "..." << endl;
+
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
-			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "allow_other,default_permissions,fsname=cachegw,subtype=cachegw") ||
+			fuse_opt_add_arg(&args, "-oallow_other,default_permissions") ||
+			fuse_opt_add_arg(&args, fsnameopt.c_str()) ||
 			(cgwfs.opts.kernel_passthrough &&
 			 fuse_opt_add_arg(&args, "-onosuid,nodev")) ||
 			(options.count("debug-fuse") &&
@@ -912,13 +931,26 @@ int main(int argc, char *argv[])
 
 	cgwfs.opts.source = cgwfs.source.c_str();
 	cgwfs.opts.mountpoint = cgwfs.mountpoint.c_str();
-	cgwfs.opts.foreground = true;
+	// notifyfs without --debug starts daemonized
+	// cachegwfs always starts in foreground
+	cgwfs.opts.foreground = (cgwfs.debug() || fsname != "notifyfs");
 	cgwfs_assign_operations(cgwfs.oper);
 
 	// If we are not redirecting, do not register cachegwfs module
 	int num_modules = !cgwfs.redirect_path.empty();
-	fuse_passthrough_module *modules[] = { &cgwfs };
+	int start_module = !num_modules;
+	// Optionally chain notifyfs after cachwgwfs module -
+	// operations of the last module chained gets called first.
+	fuse_passthrough_module *nfyfs = NULL;
+	if (options.count("index_path")) {
+		auto index_path = options["index_path"].as<string>();
+		cout << "notifyfs index is " << index_path << endl;
+		nfyfs_init(cgwfs.opts, index_path);
+		nfyfs = nfyfs_module();
+		num_modules++;
+	}
+	fuse_passthrough_module *modules[] = { &cgwfs, nfyfs };
 
-	return fuse_passthrough_main(&args, cgwfs.opts, modules, num_modules,
-				     sizeof(cgwfs.oper));
+	return fuse_passthrough_main(&args, cgwfs.opts, &modules[start_module],
+				     num_modules, sizeof(cgwfs.oper));
 }
