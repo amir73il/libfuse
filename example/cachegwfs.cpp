@@ -300,6 +300,11 @@ static bool path_is_dir(const fuse_path_at &at)
 	return false;
 }
 
+static uint64_t *get_folder_id(const fuse_inode_state_t &state)
+{
+	return (uint64_t *)state.get();
+}
+
 //
 // cachegwfs operations
 //
@@ -320,7 +325,43 @@ static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	}
 	// Lookup itself is never in the redirected path, because we
 	// need to find the real xfs inode
-	return next_op(lookup)(at, e);
+	auto ret = next_op(lookup)(at, e);
+	if (ret)
+		return ret;
+
+	// If subdir name is not a decimal number, the folder id is undefined.
+	// For all other inodes, it is inheritted from the parent.
+	fuse_inode_state_t state;
+	if (at.inode().is_root() && S_ISDIR(e->attr.st_mode)) {
+		uint64_t folder_id = strtoull(at.path(), NULL, 10);
+		if (cgwfs.debug() && folder_id)
+			cerr << "DEBUG: first level subdir folder id "
+				<< folder_id << endl;
+
+		if (folder_id) {
+			auto p = new (nothrow) uint64_t;
+			if (p) {
+				*p = folder_id;
+				state.reset(p);
+			} else if (cgwfs.debug()) {
+				cerr << "ERROR: Allocate inode state failed."
+					<< endl;
+			}
+		}
+	} else if (at.inode().get_module_state(cgwfs, state)) {
+		if (cgwfs.debug())
+			cerr << "DEBUG: inherit parent folder id "
+				<< *get_folder_id(state) << endl;
+	}
+
+	if (state && !set_module_inode_state(cgwfs, e->ino, state)) {
+		if (cgwfs.debug())
+			cerr << "ERROR: failed setting folder id "
+				<< *get_folder_id(state)
+				<< " ino=" << e->ino << endl;
+	}
+
+	return 0;
 }
 
 static int cgwfs_getattr(const fuse_path_at &in, struct stat *attr,
