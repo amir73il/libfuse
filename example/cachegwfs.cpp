@@ -77,6 +77,7 @@ enum op {
 	OP_UNLINK,
 	OP_SYMLINK,
 	OP_MKDIR,
+	OP_MVDIR,
 	OP_RMDIR,
 	OP_MKNOD,
 	OP_GETXATTR,
@@ -97,6 +98,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_TRUNCATE, "truncate" },
 	{ OP_UTIMENS, "utimens" },
 	{ OP_MKDIR, "mkdir" },
+	{ OP_MVDIR, "mvdir" },
 	{ OP_RMDIR, "rmdir" },
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
@@ -284,6 +286,16 @@ static int check_safe_fd(fuse_file_info *fi)
 	return -1;
 }
 
+static bool path_is_dir(const fuse_path_at &at)
+{
+	struct stat st;
+
+	if (fstatat(at.dirfd(), at.path(), &st, at.flags()) == 0)
+		return S_ISDIR(st.st_mode);
+
+	return false;
+}
+
 //
 // cachegwfs operations
 //
@@ -371,11 +383,17 @@ static int cgwfs_rmdir(const fuse_path_at &in)
 	return next_op(rmdir)(out);
 }
 
+static enum op redirect_rename_op(const fuse_path_at &at)
+{
+	return path_is_dir(at) ? OP_MVDIR : OP_RENAME;
+}
+
 static int cgwfs_rename(const fuse_path_at &oldin, const fuse_path_at &newin,
 			unsigned int flags)
 {
-	auto oldout = get_fd_path_op(oldin, OP_RENAME);
-	auto newout = get_fd_path_op(newin, OP_RENAME);
+	auto op = redirect_rename_op(oldin);
+	auto oldout = get_fd_path_op(oldin, op);
+	auto newout = get_fd_path_op(newin, op);
 	return next_op(rename)(oldout, newout, flags);
 }
 
