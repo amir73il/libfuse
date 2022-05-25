@@ -312,6 +312,7 @@ enum op {
 	OP_UNLINK,
 	OP_SYMLINK,
 	OP_MKDIR,
+	OP_MVDIR,
 	OP_RMDIR,
 	OP_MKNOD,
 	OP_GETXATTR,
@@ -332,6 +333,7 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_TRUNCATE, "truncate" },
 	{ OP_UTIMENS, "utimens" },
 	{ OP_MKDIR, "mkdir" },
+	{ OP_MVDIR, "mvdir" },
 	{ OP_RMDIR, "rmdir" },
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
@@ -637,6 +639,16 @@ static void print_fd_path(int fd)
 {
 	string path;
 	(void)get_fd_path_at(fd, "", OP_FD_PATH, path);
+}
+
+static bool path_is_dir(int dirfd, const char *path)
+{
+	struct stat st;
+
+	if (fstatat(dirfd, path, &st, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) == 0)
+		return S_ISDIR(st.st_mode);
+
+	return false;
 }
 
 static int open_redirect_fd(int dirfd, const char *name, int flags)
@@ -1603,6 +1615,11 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 }
 
 
+static enum op redirect_rename_op(int dirfd, const char *name)
+{
+	return path_is_dir(dirfd, name) ? OP_MVDIR : OP_RENAME;
+}
+
 static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_ino_t newparent, const char *newname,
 		unsigned int flags) {
@@ -1617,8 +1634,9 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	string oldpath, newpath;
-	int olddirfd = get_fd_path_at(inode_p.fd, name, OP_RENAME, oldpath);
-	int newdirfd = get_fd_path_at(inode_np.fd, newname, OP_RENAME, newpath);
+	auto op = redirect_rename_op(inode_p.fd, name);
+	int olddirfd = get_fd_path_at(inode_p.fd, name, op, oldpath);
+	int newdirfd = get_fd_path_at(inode_np.fd, newname, op, newpath);
 	auto res = renameat(olddirfd, oldpath.c_str(), newdirfd, newpath.c_str());
 	if (res == -1)
 		fuse_reply_err(req, errno);
