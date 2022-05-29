@@ -895,6 +895,9 @@ struct File : public FileHandle {
 
 	int get_fd() override { return _fd; };
 
+	int get_redirect_fd() { return _redirect_fd; };
+	void set_redirect_fd(int rfd) { _redirect_fd = rfd; };
+
 	File() = delete;
 	File(const File&) = delete;
 	File& operator=(const File&) = delete;
@@ -908,8 +911,18 @@ struct File : public FileHandle {
 			cerr << "DEBUG: close(): fd=" << _fd << endl;
 		if (_fd > 0)
 			close(_fd);
+		if (_redirect_fd > 0)
+			close(_redirect_fd);
 	}
+
+private:
+	int _redirect_fd {-1};
 };
+
+static File *get_file(fuse_file_info *fi)
+{
+	return reinterpret_cast<File*>(fi->fh);
+}
 
 static FileHandle *get_file_handle(fuse_file_info *fi)
 {
@@ -2264,31 +2277,38 @@ static void sfs_copy_file_range(fuse_req_t req,
 		size_t len, int flags)
 {
 	ssize_t res;
-	auto fd_in = get_file_fd(fi_in);
-	auto fd_out = get_file_fd(fi_out);
+	auto fh_in = get_file(fi_in);
+	auto fh_out = get_file(fi_out);
+	auto fd_in = fh_in->get_fd();
+	auto fd_out = fh_out->get_fd();
 	auto redirect = fs.redirect_op(OP_COPY);
 
-	// We could check if fd_in or fd_out are already redirected
-	// and we could store the redirected fd in File struct, but
-	// for now we always open temp fds to redirect copy
+	// Check if fd_in or fd_out are already redirected
+	// and store the redirected fds in File struct
 	if (redirect) {
 		InodeRef inode_in(get_inode(ino_in));
 		InodeRef inode_out(get_inode(ino_out));
 		if (inode_in.error(req) || inode_out.error(req))
 			return;
 
-		fd_in = do_open(inode_in, OP_COPY, O_RDONLY);
+		fd_in = fh_in->get_redirect_fd();
+		if (fd_in == -1)
+			fd_in = do_open(inode_in, OP_COPY, O_RDONLY);
 		if (fd_in == -1) {
 			fuse_reply_fd_err(req, errno);
 			return;
 		}
+		fh_in->set_redirect_fd(fd_in);
 
-		fd_out = do_open(inode_out, OP_COPY, O_RDWR);
+		fd_out = fh_out->get_redirect_fd();
+		if (fd_out == -1)
+			fd_out = do_open(inode_out, OP_COPY, O_RDWR);
 		if (fd_out == -1) {
 			fuse_reply_fd_err(req, errno);
 			close(fd_in);
 			return;
 		}
+		fh_out->set_redirect_fd(fd_out);
 	}
 
 	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
@@ -2296,11 +2316,6 @@ static void sfs_copy_file_range(fuse_req_t req,
 		fuse_reply_err(req, errno);
 	else
 		fuse_reply_write(req, res);
-
-	if (redirect) {
-		close(fd_in);
-		close(fd_out);
-	}
 }
 
 
