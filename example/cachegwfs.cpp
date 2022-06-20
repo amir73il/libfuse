@@ -636,6 +636,13 @@ static void print_fd_path(int fd)
 	(void)get_fd_path_at(fd, "", OP_FD_PATH, path);
 }
 
+static int open_redirect_fd(int dirfd, const char *name, int flags)
+{
+	string path;
+	get_fd_path_at(dirfd, name, OP_REDIRECT, path);
+	return open(path.c_str(), flags & ~O_NOFOLLOW);
+}
+
 static enum op redirect_open_op(int flags)
 {
 	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
@@ -2293,7 +2300,7 @@ static void sfs_copy_file_range(fuse_req_t req,
 
 		fd_in = fh_in->get_redirect_fd();
 		if (fd_in == -1)
-			fd_in = do_open(inode_in, OP_COPY, O_RDONLY);
+			fd_in = open_redirect_fd(inode_in.fd, "", O_RDONLY);
 		if (fd_in == -1) {
 			fuse_reply_fd_err(req, errno);
 			return;
@@ -2302,7 +2309,7 @@ static void sfs_copy_file_range(fuse_req_t req,
 
 		fd_out = fh_out->get_redirect_fd();
 		if (fd_out == -1)
-			fd_out = do_open(inode_out, OP_COPY, O_RDWR);
+			fd_out = open_redirect_fd(inode_out.fd, "", O_RDWR);
 		if (fd_out == -1) {
 			fuse_reply_fd_err(req, errno);
 			close(fd_in);
