@@ -577,6 +577,7 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 // /proc/self/fd/<dirfd> and the special value AT_PROCFD is returned.
 // This value cannot be used for *at() syscalls!!!
 #define AT_PROCFD (AT_FDCWD - 1)
+#define IS_REDIRECETED(dirfd) ((dirfd) == AT_FDCWD)
 
 static int get_fd_path_at(int dirfd, const char *name, enum op op, string &outpath,
 	uint64_t folder_id = 0)
@@ -648,12 +649,8 @@ static enum op redirect_open_op(int flags)
 	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
 }
 
-static int check_safe_fd(int fd, int dirfd, enum op op, uint64_t folder_id)
+static int check_safe_fd(int fd, enum op op, uint64_t folder_id)
 {
-	auto redirected = (dirfd == AT_FDCWD);
-	if (redirected)
-		return 0;
-
 	// cachegw manager takes an exclusive lock before making file a stub
 	if (flock(fd, LOCK_SH | LOCK_NB) == -1) {
 		auto saverr = errno;
@@ -1858,9 +1855,10 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 
 
 static int do_create(fuse_req_t req, int fd, const char *name, enum op op,
-		     int flags, mode_t mode, int &dirfd) {
+		     int flags, mode_t mode, bool &redirected) {
 	string path;
-	dirfd = get_fd_path_at(fd, name, op, path);
+	auto dirfd = get_fd_path_at(fd, name, op, path);
+	redirected = IS_REDIRECETED(dirfd);
 	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
 		});
@@ -1873,13 +1871,13 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 
 	enum op op = redirect_open_op(fi->flags);
-	int dirfd;
-	auto fd = do_create(req, inode_p.fd, name, op, fi->flags, mode, dirfd);
+	bool redirected;
+	auto fd = do_create(req, inode_p.fd, name, op, fi->flags, mode, redirected);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (check_safe_fd(fd, dirfd, op, inode_p.folder_id()) == -1) {
+	if (!redirected && check_safe_fd(fd, op, inode_p.folder_id()) == -1) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
@@ -1927,22 +1925,12 @@ static void sfs_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 }
 
 
-static int do_open(InodeRef &inode, enum op op, int flags)
+static int do_open(InodeRef &inode, enum op op, int flags, bool &redirected)
 {
 	string path;
 	auto dirfd = get_fd_path_at(inode.fd, "", op, path, inode.folder_id());
-	auto fd = open(path.c_str(), flags & ~O_NOFOLLOW);
-	if (fd == -1)
-		return -1;
-
-	if (check_safe_fd(fd, dirfd, op, inode.folder_id()) == -1) {
-		auto saverr = errno;
-		close(fd);
-		errno = saverr;
-		return -1;
-	}
-
-	return fd;
+	redirected = IS_REDIRECETED(dirfd);
+	return open(path.c_str(), flags & ~O_NOFOLLOW);
 }
 
 static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
@@ -1969,9 +1957,15 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
 	enum op op = redirect_open_op(fi->flags);
-	auto fd = do_open(inode, op, fi->flags);
+	bool redirected;
+	auto fd = do_open(inode, op, fi->flags, redirected);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
+		return;
+	}
+	if (!redirected && check_safe_fd(fd, op, inode.folder_id()) == -1) {
+		fuse_reply_fd_err(req, errno);
+		close(fd);
 		return;
 	}
 
