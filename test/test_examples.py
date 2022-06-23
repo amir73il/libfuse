@@ -186,7 +186,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("redirect", ('', 'all', 'open_rw', 'open_ro'))
+@pytest.mark.parametrize("redirect", ('', 'all', 'open_rw', 'open_ro','copy'))
 @pytest.mark.parametrize("name", ('passthrough_hp', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
 def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
@@ -246,13 +246,12 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
         tst_link(mnt_dir)
         tst_truncate_path(mnt_dir)
         tst_truncate_fd(mnt_dir)
-        if not redirect:
-            tst_open_unlink(mnt_dir)
+        tst_open_unlink(mnt_dir)
 
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we
         # can't use it.
-        if not cache and not redirect:
+        if not cache:
             syscall_test_cmd = [ os.path.join(basename, 'test', 'test_syscalls'),
                              mnt_dir, ':' + src_dir ]
             subprocess.check_call(syscall_test_cmd)
