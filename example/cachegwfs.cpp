@@ -952,6 +952,18 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 	fuse_reply_err(req, err);
 }
 
+static File *fd_open(int fd, bool redirected, enum op op, uint64_t folder_id)
+{
+	if (!redirected && check_safe_fd(fd, op, folder_id) == -1)
+		return NULL;
+
+	auto fh = new (nothrow) File(fd);
+	if (!fh)
+		errno = ENOMEM;
+
+	return fh;
+}
+
 static void sfs_init(void *userdata, fuse_conn_info *conn) {
 	(void)userdata;
 	if (conn->capable & FUSE_CAP_EXPORT_SUPPORT)
@@ -1877,15 +1889,10 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (!redirected && check_safe_fd(fd, op, inode_p.folder_id()) == -1) {
-		fuse_reply_fd_err(req, errno);
-		close(fd);
-		return;
-	}
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = fd_open(fd, redirected, op, inode_p.folder_id());
 	if (!fh) {
-		fuse_reply_err(req, ENOMEM);
+		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
 	}
@@ -1963,15 +1970,10 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	if (!redirected && check_safe_fd(fd, op, inode.folder_id()) == -1) {
-		fuse_reply_fd_err(req, errno);
-		close(fd);
-		return;
-	}
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = fd_open(fd, redirected, op, inode.folder_id());
 	if (!fh) {
-		fuse_reply_err(req, ENOMEM);
+		fuse_reply_fd_err(req, errno);
 		close(fd);
 		return;
 	}
