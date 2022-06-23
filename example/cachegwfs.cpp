@@ -897,22 +897,21 @@ struct FileHandle {
 struct File : public FileHandle {
 	int _fd {-1};
 
-	int get_fd() override { return _fd; };
+	int get_fd() override { return _fd > 0 ? _fd : _redirect_fd; };
 
 	int get_redirect_fd() { return _redirect_fd; };
-	void set_redirect_fd(int rfd) { _redirect_fd = rfd; };
 
 	File() = delete;
 	File(const File&) = delete;
 	File& operator=(const File&) = delete;
 
-	File(int fd) : _fd(fd) {
+	File(int fd, int rfd) : _fd(fd), _redirect_fd(rfd) {
 		if (fs.debug)
-			cerr << "DEBUG: open(): fd=" << _fd << endl;
+			cerr << "DEBUG: open(): fd=" << _fd << " rfd=" << _redirect_fd << endl;
 	}
 	~File() {
 		if (fs.debug)
-			cerr << "DEBUG: close(): fd=" << _fd << endl;
+			cerr << "DEBUG: close(): fd=" << _fd << " rfd=" << _redirect_fd << endl;
 		if (_fd > 0)
 			close(_fd);
 		if (_redirect_fd > 0)
@@ -952,12 +951,27 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 	fuse_reply_err(req, err);
 }
 
-static File *fd_open(int fd, bool redirected, enum op op, uint64_t folder_id)
+static File *fd_open(int fd, bool redirected, enum op op, uint64_t folder_id,
+		     int dirfd, const char *name, int flags)
 {
-	if (!redirected && check_safe_fd(fd, op, folder_id) == -1)
-		return NULL;
+	auto rfd = -1;
 
-	auto fh = new (nothrow) File(fd);
+	if (redirected) {
+		// fd is already redirected - swap it with rfd
+		rfd = fd;
+		fd = -1;
+	} else if (check_safe_fd(fd, op, folder_id) == -1) {
+		return NULL;
+	} else if (fs.redirect_op(OP_COPY)) {
+		// open redirect fd in addition to the bypass fd.
+		// when called from create(), we must not try to create
+		// a file in redirect path, only to open it.
+		rfd = open_redirect_fd(dirfd, name, flags & ~O_CREAT);
+		if (rfd == -1)
+			return NULL;
+	}
+
+	auto fh = new (nothrow) File(fd, rfd);
 	if (!fh)
 		errno = ENOMEM;
 
@@ -1890,7 +1904,8 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode_p.folder_id());
+	auto fh = fd_open(fd, redirected, op, inode_p.folder_id(),
+			  inode_p.fd, name, fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
@@ -1971,7 +1986,8 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode.folder_id());
+	auto fh = fd_open(fd, redirected, op, inode.folder_id(),
+			  inode.fd, "", fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
@@ -2275,8 +2291,8 @@ static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
 #endif
 
 static void sfs_copy_file_range(fuse_req_t req,
-		fuse_ino_t ino_in, off_t off_in, struct fuse_file_info *fi_in,
-		fuse_ino_t ino_out, off_t off_out, struct fuse_file_info *fi_out,
+		fuse_ino_t, off_t off_in, struct fuse_file_info *fi_in,
+		fuse_ino_t, off_t off_out, struct fuse_file_info *fi_out,
 		size_t len, int flags)
 {
 	ssize_t res;
@@ -2286,32 +2302,19 @@ static void sfs_copy_file_range(fuse_req_t req,
 	auto fd_out = fh_out->get_fd();
 	auto redirect = fs.redirect_op(OP_COPY);
 
-	// Check if fd_in or fd_out are already redirected
-	// and store the redirected fds in File struct
+	// Get redirected fds from File struct
 	if (redirect) {
-		InodeRef inode_in(get_inode(ino_in));
-		InodeRef inode_out(get_inode(ino_out));
-		if (inode_in.error(req) || inode_out.error(req))
-			return;
-
 		fd_in = fh_in->get_redirect_fd();
-		if (fd_in == -1)
-			fd_in = open_redirect_fd(inode_in.fd, "", O_RDONLY);
 		if (fd_in == -1) {
-			fuse_reply_fd_err(req, errno);
+			fuse_reply_fd_err(req, EBADF);
 			return;
 		}
-		fh_in->set_redirect_fd(fd_in);
 
 		fd_out = fh_out->get_redirect_fd();
-		if (fd_out == -1)
-			fd_out = open_redirect_fd(inode_out.fd, "", O_RDWR);
 		if (fd_out == -1) {
-			fuse_reply_fd_err(req, errno);
-			close(fd_in);
+			fuse_reply_fd_err(req, EBADF);
 			return;
 		}
-		fh_out->set_redirect_fd(fd_out);
 	}
 
 	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
