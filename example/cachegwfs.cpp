@@ -455,6 +455,7 @@ struct Fs {
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
+	int get_projid(int dirfd, __u64 ino);
 
 private:
 	bool get_root_fh(ino_t src_ino, bool connectable = true);
@@ -720,6 +721,27 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	}
 
 	return bstat.bs_gen;
+}
+
+int Fs::get_projid(int dirfd, __u64 ino)
+{
+        struct fsxattr fsx = {};
+        int fd, saverr, ret = -1;
+
+	fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
+	if (fd > 0) {
+		ret = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
+		saverr = errno;
+		close(fd);
+		errno = saverr;
+	}
+        if (ret == -1) {
+		if (debug)
+			cerr << "DEBUG: failed to get project id; ino =" << ino << ", errno=" << errno << endl;
+		return 0;
+	}
+
+	return fsx.fsx_projid;
 }
 
 int Fs::open_by_fh(InodePtr inode)
@@ -1207,8 +1229,19 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// If subdir name is not a decimal number, the folder id is 0.
 	// For all other inodes, it is inheritted from the parent.
 	uint64_t folder_id = parent.folder_id();
-	auto is_folder_root = parent.is_root() && S_ISDIR(e->attr.st_mode);
-	if (is_folder_root) {
+	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
+	auto is_folder_root = parent.is_root() && is_subdir;
+	if (is_subdir && !fs.ino32) {
+		auto projid = fs.get_projid(newfd, e->ino);
+		if (projid) {
+			folder_id = projid;
+			if (fs.debug)
+				cerr << "DEBUG: lookup(): '" << name
+					<< "' is root of sub-folder id " << projid
+					<< "." << endl;
+		}
+	}
+	if (is_folder_root && !folder_id) {
 		folder_id = strtoull(name, NULL, 10);
 		if (fs.debug && !folder_id)
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
