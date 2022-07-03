@@ -356,6 +356,7 @@ struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
 	std::string readdir_xattr;
+	std::string folder_id_xattr;
 	vector<string> xattr_prefixes;
 	std::unordered_set<enum op> ops; // fs operations to redirect
 	std::unordered_set<uint64_t> folder_ids; // folder ids to redirect
@@ -457,7 +458,7 @@ struct Fs {
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
-	int get_projid(int dirfd, __u64 ino);
+	uint64_t get_folder_id(int dirfd, __u64 ino);
 
 private:
 	bool get_root_fh(ino_t src_ino, bool connectable = true);
@@ -735,25 +736,29 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	return bstat.bs_gen;
 }
 
-int Fs::get_projid(int dirfd, __u64 ino)
+uint64_t Fs::get_folder_id(int dirfd, __u64 ino)
 {
-        struct fsxattr fsx = {};
-        int fd, saverr, ret = -1;
+	auto r = redirect();
+	if (r->folder_id_xattr.empty())
+		return 0;
+
+	uint64_t folder_id = 0;
+	int fd, saverr, ret = -1;
 
 	fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
 	if (fd > 0) {
-		ret = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
+		ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder_id, sizeof(folder_id));
 		saverr = errno;
 		close(fd);
 		errno = saverr;
 	}
         if (ret == -1) {
-		if (debug)
-			cerr << "DEBUG: failed to get project id; ino =" << ino << ", errno=" << errno << endl;
+		if (debug && errno != ENODATA)
+			cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
 		return 0;
 	}
 
-	return fsx.fsx_projid;
+	return folder_id;
 }
 
 int Fs::open_by_fh(InodePtr inode)
@@ -1243,13 +1248,13 @@ static int do_lookup(InodeRef& parent, const char *name,
 	uint64_t folder_id = parent.folder_id();
 	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
 	auto is_folder_root = parent.is_root() && is_subdir;
-	if (is_subdir && !fs.ino32) {
-		auto projid = fs.get_projid(newfd, e->ino);
-		if (projid) {
-			folder_id = projid;
+	if (is_subdir) {
+		auto new_folder_id = fs.get_folder_id(newfd, e->ino);
+		if (new_folder_id) {
+			folder_id = new_folder_id;
 			if (fs.debug)
 				cerr << "DEBUG: lookup(): '" << name
-					<< "' is root of sub-folder id " << projid
+					<< "' is root of sub-folder id " << new_folder_id
 					<< "." << endl;
 		}
 	}
@@ -2573,6 +2578,8 @@ static Redirect *read_config_file()
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
 			redirect->set_op(OP_OPEN_RW);
+		} else if (name == "redirect_folder_id_xattr") {
+			redirect->folder_id_xattr = value;
 		} else if (name == "redirect_write_folder_id") {
 			redirect->set_folder_id(value);
 			redirect->set_op(OP_OPEN_RW);
