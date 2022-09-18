@@ -663,7 +663,7 @@ static enum op redirect_open_op(int flags)
 	return (flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
 }
 
-static int check_safe_fd(int fd, enum op op, uint64_t folder_id)
+static int check_safe_fd(int fd, enum op op)
 {
 	// cachegw manager takes an exclusive lock before making file a stub
 	if (flock(fd, LOCK_SH | LOCK_NB) == -1) {
@@ -674,7 +674,7 @@ static int check_safe_fd(int fd, enum op op, uint64_t folder_id)
 	}
 
 	// Check that file is still not a stub after lock
-	if (!should_redirect_fd(fd, NULL, op, folder_id))
+	if (!should_redirect_fd(fd, NULL, op, 0))
 		return 0;
 
 	cerr << "INFO: file open raced with evict." << endl;
@@ -995,7 +995,7 @@ static File *fd_open(int fd, bool redirected, enum op op, uint64_t folder_id,
 		// fd is already redirected - swap it with rfd
 		rfd = fd;
 		fd = -1;
-	} else if (check_safe_fd(fd, op, folder_id) == -1) {
+	} else if (check_safe_fd(fd, op) == -1) {
 		return NULL;
 	} else if (fs.redirect_op(OP_COPY)) {
 		// open redirect fd in addition to the bypass fd.
