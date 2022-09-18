@@ -986,7 +986,7 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 	fuse_reply_err(req, err);
 }
 
-static File *fd_open(int fd, bool redirected, enum op op, uint64_t folder_id,
+static File *fd_open(int fd, bool redirected, enum op op,
 		     int dirfd, const char *name, int flags)
 {
 	auto rfd = -1;
@@ -1926,10 +1926,10 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 }
 
 
-static int do_create(fuse_req_t req, int fd, const char *name, enum op op,
+static int do_create(fuse_req_t req, InodeRef &inode_p, const char *name, enum op op,
 		     int flags, mode_t mode, bool &redirected) {
 	string path;
-	auto dirfd = get_fd_path_at(fd, name, op, path);
+	auto dirfd = get_fd_path_at(inode_p.fd, name, op, path, inode_p.folder_id());
 	redirected = IS_REDIRECETED(dirfd);
 	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
@@ -1944,14 +1944,13 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 	enum op op = redirect_open_op(fi->flags);
 	bool redirected;
-	auto fd = do_create(req, inode_p.fd, name, op, fi->flags, mode, redirected);
+	auto fd = do_create(req, inode_p, name, op, fi->flags, mode, redirected);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode_p.folder_id(),
-			  inode_p.fd, name, fi->flags);
+	auto fh = fd_open(fd, redirected, op, inode_p.fd, name, fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
@@ -2032,8 +2031,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode.folder_id(),
-			  inode.fd, "", fi->flags);
+	auto fh = fd_open(fd, redirected, op, inode.fd, "", fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		close(fd);
