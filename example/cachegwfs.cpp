@@ -1567,47 +1567,6 @@ static void sfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 }
 
 
-static int do_link(InodeRef &inode, int dfd, const char *name) {
-	auto path = inode.get_path(OP_LINK);
-	string newpath;
-	int newdirfd = get_fd_path_at(dfd, name, OP_LINK, newpath);
-	return linkat(AT_FDCWD, path, newdirfd, newpath.c_str(), AT_SYMLINK_FOLLOW);
-}
-
-
-static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
-		const char *name) {
-	InodeRef inode(get_inode(ino));
-	InodeRef inode_p(get_inode(parent));
-	if (inode.error(req) || inode_p.error(req))
-		return;
-
-	fuse_entry_param e {};
-	e.attr_timeout = fs.timeout;
-	e.entry_timeout = fs.timeout;
-
-	auto res = do_link(inode, inode_p.fd, name);
-	if (res == -1) {
-		fuse_reply_err(req, errno);
-		return;
-	}
-
-	res = fstatat(inode.fd, "", &e.attr, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
-	if (res == -1) {
-		fuse_reply_err(req, errno);
-		return;
-	}
-	e.ino = ino;
-	{
-		lock_guard<mutex> g {inode.i->m};
-		inode.i->nlookup++;
-	}
-
-	fuse_reply_entry(req, &e);
-	return;
-}
-
-
 static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	InodeRef inode_p(get_inode(parent));
 	if (inode_p.error(req))
@@ -2380,7 +2339,6 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.mkdir = sfs_mkdir;
 	sfs_oper.mknod = sfs_mknod;
 	sfs_oper.symlink = sfs_symlink;
-	sfs_oper.link = sfs_link;
 	sfs_oper.unlink = sfs_unlink;
 	sfs_oper.rmdir = sfs_rmdir;
 	sfs_oper.rename = sfs_rename;

@@ -243,7 +243,8 @@ def test_passthrough_hp(short_tmpdir, redirect, cache, name, output_checker):
         # Underlying fs may not have full nanosecond resolution
         tst_utimens(mnt_dir, ns_tol=1000)
 
-        tst_link(mnt_dir)
+        if name != 'cachegwfs':
+            tst_link(mnt_dir)
         tst_truncate_path(mnt_dir)
         tst_truncate_fd(mnt_dir)
         tst_open_unlink(mnt_dir)
