@@ -326,8 +326,13 @@ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *co
 	mt.error = 0;
 	mt.numworker = 0;
 	mt.numavail = 0;
-	mt.max_idle = config->max_idle_threads;
-	mt.max_threads = INT_MAX;
+	if (config->max_idle_threads < -1) {
+		mt.max_threads = -config->max_idle_threads;
+		mt.max_idle = -1;
+	} else {
+		mt.max_idle = config->max_idle_threads;
+		mt.max_threads = INT_MAX;
+	}
 	mt.main.thread_id = pthread_self();
 	mt.main.prev = mt.main.next = &mt.main;
 	sem_init(&mt.finish, 0, 0);

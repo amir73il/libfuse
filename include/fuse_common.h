@@ -127,6 +127,9 @@ struct fuse_loop_config {
 	 * of threads in the pool will cause a lot of thread creation and
 	 * deletion overhead and performance may suffer. When set to 0, a new
 	 * thread will be created to service every operation.
+	 *
+	 * Negative value means idle threads do not get destroyed.
+	 * -N < -1 means max number of started thread is N.
 	 */
 	int max_idle_threads;
 };
