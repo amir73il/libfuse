@@ -2413,6 +2413,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nosplice", "Do not use splice(2) to transfer data")
 		("nokeepfd", "Do not keep open fd for all inodes in cache")
 		("norwpassthrough", "Do not use pass-through mode for read/write")
+		("max_idle_threads", "Size of thread pool", cxxopts::value<int>(), "N")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -2641,7 +2642,9 @@ int main(int argc, char *argv[]) {
 	// Mount and run main loop
 	struct fuse_loop_config loop_config;
 	loop_config.clone_fd = 1;
-	loop_config.max_idle_threads = 10;
+	loop_config.max_idle_threads = 100;
+	if (options.count("max_idle_threads"))
+		loop_config.max_idle_threads = options["max_idle_threads"].as<int>();
 	if (fuse_session_mount(se, argv[2]) != 0)
 		goto err_out3;
 	if (options.count("single"))
