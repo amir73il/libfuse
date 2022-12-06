@@ -1394,8 +1394,13 @@ static int test_link(void)
 	unlink(testfile2);
 	res = link(testfile, testfile2);
 	if (res == -1) {
+		if (errno == ENOSYS || errno == ENOTSUP || errno == EOPNOTSUPP)
+			err = errno;
 		PERROR("link");
-		return -1;
+		if (!err)
+			return -1;
+		else
+			goto unlink;
 	}
 	res = check_type(testfile2, S_IFREG);
 	if (res == -1)
@@ -1404,11 +1409,15 @@ static int test_link(void)
 	err += check_nlink(testfile2, 2);
 	err += check_size(testfile2, datalen);
 	err += check_data(testfile2, data, 0, datalen);
+unlink:
 	res = unlink(testfile);
 	if (res == -1) {
 		PERROR("unlink");
 		return -1;
 	}
+	// Skip test if link() is not supported
+	if (err)
+		return 0;
 	res = check_nonexist(testfile);
 	if (res == -1)
 		return -1;
@@ -1444,14 +1453,20 @@ static int test_link2(void)
 	unlink(testfile2);
 	res = link(testfile, testfile2);
 	if (res == -1) {
+		if (errno == ENOSYS || errno == ENOTSUP || errno == EOPNOTSUPP)
+			err = errno;
 		PERROR("link");
-		return -1;
+		if (!err)
+			return -1;
 	}
 	res = unlink(testfile);
 	if (res == -1) {
 		PERROR("unlink");
 		return -1;
 	}
+	// Skip test if link() is not supported
+	if (err)
+		return 0;
 	res = check_nonexist(testfile);
 	if (res == -1)
 		return -1;
