@@ -420,6 +420,7 @@ struct Fs {
 	int at_connectable {0};
 	atomic_ulong num_keepfd{0};
 	unsigned long max_keepfd{0};
+	bool nokeepfd;
 
 	Fs() {
 		// Initialize a dead inode
@@ -1267,7 +1268,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// For non-dir looked up by name, store parent fh if we can use it to open
 	// an fd with a connected path or keep a long lived fd with connected path
 	auto is_connectable = parent.is_dir() && !S_ISDIR(e->attr.st_mode);
-	auto keepfd = is_folder_root;
+	auto keepfd = !fs.nokeepfd || is_folder_root;
 	if (is_connectable && !fs.at_connectable) {
 		is_connectable = false;
 		keepfd = true;
@@ -2410,6 +2411,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
+		("nokeepfd", "Do not keep open fd for all inodes in cache")
 		("norwpassthrough", "Do not use pass-through mode for read/write")
 		("single", "Run single-threaded");
 
@@ -2428,6 +2430,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	}
 
 	fs.nosplice = options.count("nosplice") != 0;
+	fs.nokeepfd = options.count("nokeepfd") != 0;
 	if (options.count("nocache") == 0)
 		fs.wbcache = options.count("wbcache") != 0;
 	fs.rwpassthrough = options.count("norwpassthrough") == 0;
