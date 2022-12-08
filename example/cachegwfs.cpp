@@ -1027,11 +1027,44 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 	fuse_reply_err(req, err);
 }
 
+static bool is_folder_id_uptodate(InodeRef &inode)
+{
+	auto r = fs.redirect();
+	// With empty folder_id_xattr, never need to query folder id.
+	if (r->folder_id_xattr.empty())
+		return true;
+
+	// With non-empty folder_id_xattr, folder_id_version > 0 is expected.
+	// folder_id_version == 0 is a special configuration for testing
+	// "always query uptodate folder id".
+	if (r->folder_id_version == 0)
+		return false;
+
+	// Is the inode cached folder id uptodate?
+	return r->folder_id_version == inode.get_folder().ver;
+}
+
+static bool should_open_redirect_fd(InodeRef &inode, enum op op,
+				    bool &redirect_folder_id)
+{
+	// We need redirected fd for copy_file_range()
+	auto redirect_copy = fs.redirect_op(OP_COPY);
+
+	if (op != OP_OPEN_RW)
+		return redirect_copy;
+
+	// We need redirected fd to get uptodate folder id
+	redirect_folder_id = !is_folder_id_uptodate(inode);
+
+	return redirect_folder_id || redirect_copy;
+}
+
 static File *fd_open(int fd, bool redirected, enum op op,
-		     int dirfd, const char *name, int flags)
+		     InodeRef &inode, const char *name, int flags)
 {
 	auto rfd = -1;
 	File *fh = NULL;
+	bool redirect_folder_id = false;
 
 	if (redirected) {
 		// fd is already redirected - swap it with rfd
@@ -1039,13 +1072,31 @@ static File *fd_open(int fd, bool redirected, enum op op,
 		fd = -1;
 	} else if (check_safe_fd(fd, op) == -1) {
 		goto out_err;
-	} else if (fs.redirect_op(OP_COPY)) {
+	} else if (should_open_redirect_fd(inode, op, redirect_folder_id)) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
-		rfd = open_redirect_fd(dirfd, name, flags & ~O_CREAT);
+		rfd = open_redirect_fd(inode.fd, name, flags & ~O_CREAT);
 		if (rfd == -1)
 			goto out_err;
+	}
+
+	if (redirect_folder_id) {
+		// Get uptodate folder id from redirected fd
+		auto folder = inode.get_folder();
+		auto redirect_folder = fs.get_folder_fd(rfd, inode.ino());
+		inode.set_folder(redirect_folder);
+		if (fs.debug)
+			cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
+				<< " update folder id "
+				<< folder.id << ":" << folder.ver << " => "
+				<< redirect_folder.id << ":" << redirect_folder.ver
+				<< "." << endl;
+		// Writes may need to be redirected due to uptodate folder id
+		if (should_redirect_fd(fd, NULL, op, redirect_folder.id)) {
+			close(fd);
+			fd = -1;
+		}
 	}
 
 	fh = new (nothrow) File(fd, rfd);
@@ -1291,10 +1342,12 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// Folder id of first level subdirs is their name.
 	// If subdir name is not a decimal number, the folder id is 0.
 	// For all other inodes, it is inheritted from the parent.
+	// With version == 0, we update folder id on open for write.
 	auto folder = parent.get_folder();
+	auto version = fs.get_folder_id_version();
 	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
 	auto is_folder_root = parent.is_root() && is_subdir;
-	if (is_subdir) {
+	if (is_subdir && version && !is_folder_id_uptodate(parent)) {
 		auto new_folder = fs.get_folder_at(newfd, e->ino);
 		if (new_folder.id) {
 			folder = new_folder;
@@ -1306,7 +1359,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 	}
 	if (is_folder_root && !folder.id) {
 		folder.id = strtoull(name, NULL, 10);
-		folder.ver = fs.get_folder_id_version();
+		folder.ver = version;
 		if (fs.debug && !folder.id)
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
 				<< "' is not a folder id." << endl;
@@ -1973,7 +2026,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode_p.fd, name, fi->flags);
+	auto fh = fd_open(fd, redirected, op, inode_p, name, fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		return;
@@ -2053,7 +2106,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode.fd, "", fi->flags);
+	auto fh = fd_open(fd, redirected, op, inode, "", fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		return;
