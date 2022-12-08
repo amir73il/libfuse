@@ -1031,27 +1031,37 @@ static File *fd_open(int fd, bool redirected, enum op op,
 		     int dirfd, const char *name, int flags)
 {
 	auto rfd = -1;
+	File *fh = NULL;
 
 	if (redirected) {
 		// fd is already redirected - swap it with rfd
 		rfd = fd;
 		fd = -1;
 	} else if (check_safe_fd(fd, op) == -1) {
-		return NULL;
+		goto out_err;
 	} else if (fs.redirect_op(OP_COPY)) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
 		rfd = open_redirect_fd(dirfd, name, flags & ~O_CREAT);
 		if (rfd == -1)
-			return NULL;
+			goto out_err;
 	}
 
-	auto fh = new (nothrow) File(fd, rfd);
-	if (!fh)
+	fh = new (nothrow) File(fd, rfd);
+	if (!fh) {
 		errno = ENOMEM;
+		goto out_err;
+	}
 
 	return fh;
+
+out_err:
+	if (fd >= 0)
+		close(fd);
+	if (rfd >= 0)
+		close(rfd);
+	return NULL;
 }
 
 static void sfs_init(void *userdata, fuse_conn_info *conn) {
@@ -1966,7 +1976,6 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	auto fh = fd_open(fd, redirected, op, inode_p.fd, name, fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
-		close(fd);
 		return;
 	}
 
@@ -1979,7 +1988,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	if (fs.rwpassthrough) {
-		int passthrough_fh = fuse_passthrough_enable(req, fd);
+		int passthrough_fh = fuse_passthrough_enable(req, fh->get_fd());
 		if (passthrough_fh > 0)
 			fi->passthrough_fh = passthrough_fh;
 		else if (fs.debug)
@@ -2047,12 +2056,11 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	auto fh = fd_open(fd, redirected, op, inode.fd, "", fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
-		close(fd);
 		return;
 	}
 
 	if (fs.rwpassthrough) {
-		int passthrough_fh = fuse_passthrough_enable(req, fd);
+		int passthrough_fh = fuse_passthrough_enable(req, fh->get_fd());
 		if (passthrough_fh > 0)
 			fi->passthrough_fh = passthrough_fh;
 		else if (fs.debug)
