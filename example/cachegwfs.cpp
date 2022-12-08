@@ -248,12 +248,17 @@ enum {
 	ftype_special,
 };
 
+struct Folder {
+	uint64_t id {0};
+	uint64_t ver {0};
+};
+
 struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	int _ftype {ftype_unknown};
 	xfs_fh src_fh {};
 	uint64_t nlookup {0};
-	uint64_t folder_id {0};
+	Folder folder;
 	std::mutex m;
 
 	bool dead() { return !src_fh.ino; }
@@ -357,6 +362,7 @@ struct Redirect {
 	std::string write_xattr;
 	std::string readdir_xattr;
 	std::string folder_id_xattr;
+	uint64_t    folder_id_version;
 	vector<string> xattr_prefixes;
 	std::unordered_set<enum op> ops; // fs operations to redirect
 	std::unordered_set<uint64_t> folder_ids; // folder ids to redirect
@@ -459,7 +465,12 @@ struct Fs {
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
-	uint64_t get_folder_id(int dirfd, __u64 ino);
+	Folder get_folder_fd(int fd, __u64 ino);
+	Folder get_folder_at(int dirfd, __u64 ino);
+	uint64_t get_folder_id_version() {
+		auto r = redirect();
+		return r->folder_id_version;
+	}
 
 private:
 	bool get_root_fh(ino_t src_ino, bool connectable = true);
@@ -737,29 +748,45 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	return bstat.bs_gen;
 }
 
-uint64_t Fs::get_folder_id(int dirfd, __u64 ino)
+Folder Fs::get_folder_fd(int fd, __u64 ino)
 {
+	Folder folder;
 	auto r = redirect();
 	if (r->folder_id_xattr.empty())
-		return 0;
+		return folder;
 
-	uint64_t folder_id = 0;
-	int fd, saverr, ret = -1;
-
-	fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
-	if (fd > 0) {
-		ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder_id, sizeof(folder_id));
-		saverr = errno;
-		close(fd);
-		errno = saverr;
-	}
+	int ret;
+	folder.ver = r->folder_id_version;
+	ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder.id, sizeof(folder.id));
         if (ret == -1) {
-		if (debug && errno != ENODATA)
-			cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
-		return 0;
+		if (errno != ENODATA) {
+			folder.ver = 0;
+			if (debug)
+				cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
+		}
+		folder.id = 0;
 	}
 
-	return folder_id;
+	return folder;
+}
+
+Folder Fs::get_folder_at(int dirfd, __u64 ino)
+{
+	// dirfd is O_PATH fd and we need O_RDONLY fd for fgetxattr()
+	auto fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
+	if (fd < 0) {
+		if (debug && errno != ENODATA)
+			cerr << "DEBUG: failed to open directory; ino =" << ino << ", errno=" << errno << endl;
+		return Folder();
+	}
+
+	int saverr;
+	auto ret = get_folder_fd(fd, ino);
+	saverr = errno;
+	close(fd);
+	errno = saverr;
+
+	return ret;
 }
 
 int Fs::open_by_fh(InodePtr inode)
@@ -848,7 +875,15 @@ struct InodeRef {
 	ino_t ino() const { return i->ino(); }
 	uint32_t gen() const { return i->gen(); }
 	ino_t nodeid() const { return i->nodeid(); }
-	uint64_t folder_id() const { return i->folder_id; }
+	Folder get_folder() const {
+		lock_guard<mutex> g {i->m};
+		return i->folder;
+	}
+	void set_folder(Folder &folder) {
+		lock_guard<mutex> g {i->m};
+		i->folder = folder;
+	}
+	uint64_t folder_id() const { return i->folder.id; }
 	bool is_redirected() const { return (dirfd == AT_FDCWD); }
 	bool is_symlink() const { return i->is_symlink(); }
 	bool is_root() const { return i->is_root(); }
@@ -1246,22 +1281,23 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// Folder id of first level subdirs is their name.
 	// If subdir name is not a decimal number, the folder id is 0.
 	// For all other inodes, it is inheritted from the parent.
-	uint64_t folder_id = parent.folder_id();
+	auto folder = parent.get_folder();
 	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
 	auto is_folder_root = parent.is_root() && is_subdir;
 	if (is_subdir) {
-		auto new_folder_id = fs.get_folder_id(newfd, e->ino);
-		if (new_folder_id) {
-			folder_id = new_folder_id;
+		auto new_folder = fs.get_folder_at(newfd, e->ino);
+		if (new_folder.id) {
+			folder = new_folder;
 			if (fs.debug)
 				cerr << "DEBUG: lookup(): '" << name
-					<< "' is root of sub-folder id " << new_folder_id
-					<< "." << endl;
+					<< "' is root of sub-folder id " << folder.id
+					<< ":" << folder.ver << "." << endl;
 		}
 	}
-	if (is_folder_root && !folder_id) {
-		folder_id = strtoull(name, NULL, 10);
-		if (fs.debug && !folder_id)
+	if (is_folder_root && !folder.id) {
+		folder.id = strtoull(name, NULL, 10);
+		folder.ver = fs.get_folder_id_version();
+		if (fs.debug && !folder.id)
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
 				<< "' is not a folder id." << endl;
 	}
@@ -1286,7 +1322,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 		}
 		if (fs.debug)
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
-				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd
+				<< ",folder id = " << inode.folder.id
+				<< ":" << inode.folder.ver << "." << endl;
 		lock_guard<mutex> g {inode.m};
 		if (inode.gen() != xfs_fh.gen) {
 			if (fs.debug)
@@ -1305,9 +1343,17 @@ static int do_lookup(InodeRef& parent, const char *name,
                                         << " updated." << endl;
 			inode.src_fh = xfs_fh;
 		}
-		// Maybe update long lived fd and folder id if opened initially by handle
-		if (!inode.folder_id)
-			inode.folder_id = folder_id;
+		// Update folder id with most recent version
+		if (folder.ver > inode.folder.ver) {
+			if (fs.debug)
+                                cerr << "DEBUG: lookup(): inode " << src_ino
+					<< " update folder id "
+					<< inode.folder.id << ":" << inode.folder.ver
+					<< " => " << folder.id << ":" << folder.ver
+					<< "." << endl;
+			inode.folder = folder;
+		}
+		// Maybe open long lived fd if opened initially by handle
 		if (inode._fd == -1 && keepfd)
 			inode.keepfd(newfd_g);
 		inode.nlookup++;
@@ -1320,7 +1366,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 		inode.set_ftype(e->attr.st_mode);
 		inode.src_fh = xfs_fh;
 		inode.nlookup = 1;
-		inode.folder_id = folder_id;
+		inode.folder = folder;
 		// Mark inode for open_by_handle
 		inode._fd = -1;
 		if (keepfd) {
@@ -1331,7 +1377,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 
 		if (fs.debug)
 			cerr << "DEBUG: lookup(): created userspace inode " << src_ino
-				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd
+				<< ",folder id = " << folder.id
+				<< ":" << folder.ver << "." << endl;
 	}
 
 	return 0;
@@ -2542,6 +2590,8 @@ static Redirect *read_config_file()
 			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_folder_id_xattr") {
 			redirect->folder_id_xattr = value;
+		} else if (name == "redirect_folder_id_version") {
+			redirect->folder_id_version = std::stol(value);
 		} else if (name == "redirect_write_folder_id") {
 			redirect->set_folder_id(value);
 			redirect->set_op(OP_OPEN_RW);
