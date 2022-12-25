@@ -1714,8 +1714,10 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	int olddirfd = get_fd_path_at(inode_p.fd, name, op, oldpath);
 	int newdirfd = get_fd_path_at(inode_np.fd, newname, op, newpath);
 	auto res = renameat(olddirfd, oldpath.c_str(), newdirfd, newpath.c_str());
-	if (res == -1)
+	if (res == -1) {
 		fuse_reply_err(req, errno);
+		return;
+	}
 
 	// Lookup to update new parent in connectable file handle of moved inode
 	fuse_entry_param e;
