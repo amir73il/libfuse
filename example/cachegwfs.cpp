@@ -1360,17 +1360,25 @@ static int do_lookup(InodeRef& parent, const char *name,
 	if (is_folder_root && !folder.id) {
 		folder.id = strtoull(name, NULL, 10);
 		folder.ver = version;
+		is_folder_root = folder.id > 0;
 		if (fs.debug && !folder.id)
 			cerr << "DEBUG: lookup(): first level subdir name '" << name
 				<< "' is not a folder id." << endl;
 	}
 	// For non-dir looked up by name, store parent fh if we can use it to open
 	// an fd with a connected path or keep a long lived fd with connected path
-	auto is_connectable = parent.is_dir() && !S_ISDIR(e->attr.st_mode);
-	auto keepfd = !fs.nokeepfd || is_folder_root;
-	if (is_connectable && !fs.at_connectable) {
-		is_connectable = false;
-		keepfd = true;
+	auto is_dir = S_ISDIR(e->attr.st_mode);
+	auto is_connectable = false;
+	auto keepfd = false;
+	if (parent.is_dir() && !is_dir) {
+		is_connectable = fs.at_connectable;
+		// Keep long lived fds for non-dir if user requested them
+		// or if parent is known and we do not have connectable fh
+		keepfd = !fs.nokeepfd || !is_connectable;
+	} else if (is_dir) {
+		// Keep long lived fds for dirs if user requested them
+		// or if dir is the folder's root dir
+		keepfd = !fs.nokeepfd || is_folder_root;
 	}
 
 	// Use convenience reference to Inode
@@ -1406,8 +1414,9 @@ static int do_lookup(InodeRef& parent, const char *name,
                                         << " updated." << endl;
 			inode.src_fh = xfs_fh;
 		}
-		// Update folder id with most recent version
-		if (folder.ver > inode.folder.ver) {
+		// Update folder id in case folder id config has changed, or inode with
+		// unknown folder id may have been reconnected after it was found by LOOKUP "."
+		if (!inode.folder.id || folder.ver > inode.folder.ver) {
 			if (fs.debug)
                                 cerr << "DEBUG: lookup(): inode " << src_ino
 					<< " update folder id "
