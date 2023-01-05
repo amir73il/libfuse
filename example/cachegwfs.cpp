@@ -465,8 +465,8 @@ struct Fs {
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
-	Folder get_folder_fd(int fd, __u64 ino);
-	Folder get_folder_at(int dirfd, __u64 ino);
+	uint64_t get_folder_id_fd(int fd, __u64 ino);
+	uint64_t get_folder_id_at(int dirfd, __u64 ino);
 	uint64_t get_folder_id_version() {
 		auto r = redirect();
 		return r->folder_id_version;
@@ -748,40 +748,38 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	return bstat.bs_gen;
 }
 
-Folder Fs::get_folder_fd(int fd, __u64 ino)
+uint64_t Fs::get_folder_id_fd(int fd, __u64 ino)
 {
-	Folder folder;
 	auto r = redirect();
 	if (r->folder_id_xattr.empty())
-		return folder;
+		return 0;
 
 	int ret;
-	folder.ver = r->folder_id_version;
-	ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder.id, sizeof(folder.id));
+	uint64_t folder_id;
+	ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder_id, sizeof(folder_id));
         if (ret == -1) {
 		if (errno != ENODATA) {
-			folder.ver = 0;
 			if (debug)
 				cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
 		}
-		folder.id = 0;
+		return 0;
 	}
 
-	return folder;
+	return folder_id;
 }
 
-Folder Fs::get_folder_at(int dirfd, __u64 ino)
+uint64_t Fs::get_folder_id_at(int dirfd, __u64 ino)
 {
 	// dirfd is O_PATH fd and we need O_RDONLY fd for fgetxattr()
 	auto fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
 	if (fd < 0) {
 		if (debug && errno != ENODATA)
 			cerr << "DEBUG: failed to open directory; ino =" << ino << ", errno=" << errno << endl;
-		return Folder();
+		return 0;
 	}
 
 	int saverr;
-	auto ret = get_folder_fd(fd, ino);
+	auto ret = get_folder_id_fd(fd, ino);
 	saverr = errno;
 	close(fd);
 	errno = saverr;
@@ -879,9 +877,10 @@ struct InodeRef {
 		lock_guard<mutex> g {i->m};
 		return i->folder;
 	}
-	void set_folder(Folder &folder) {
+	void set_folder(uint64_t id, uint64_t ver) {
 		lock_guard<mutex> g {i->m};
-		i->folder = folder;
+		i->folder.id = id;
+		i->folder.ver = ver;
 	}
 	uint64_t folder_id() const { return i->folder.id; }
 	bool is_redirected() const { return (dirfd == AT_FDCWD); }
@@ -1030,13 +1029,15 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 static bool is_folder_id_uptodate(InodeRef &inode)
 {
 	auto r = fs.redirect();
-	// With empty folder_id_xattr, never need to query folder id.
+	// With empty folder_id_xattr, cannot get folder id from redirected fd
 	if (r->folder_id_xattr.empty())
 		return true;
 
-	// With non-empty folder_id_xattr, folder_id_version > 0 is expected.
-	// folder_id_version == 0 is a special configuration for testing
-	// "always query uptodate folder id".
+	// Unknown folder id is never uptodate
+	if (!inode.get_folder().id)
+		return false;
+
+	// version 0 means always query folder id folder id from redirected fd
 	if (r->folder_id_version == 0)
 		return false;
 
@@ -1078,16 +1079,15 @@ static File *fd_open(int fd, bool redirected, enum op op,
 	if (redirect_folder_id) {
 		// Get uptodate folder id from redirected fd
 		auto folder = inode.get_folder();
-		auto redirect_folder = fs.get_folder_fd(rfd, inode.ino());
-		inode.set_folder(redirect_folder);
+		auto new_folder_id = fs.get_folder_id_fd(rfd, inode.ino());
+		inode.set_folder(new_folder_id, 0);
 		if (fs.debug)
 			cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
 				<< " update folder id "
 				<< folder.id << ":" << folder.ver << " => "
-				<< redirect_folder.id << ":" << redirect_folder.ver
-				<< "." << endl;
+				<< new_folder_id << ":0 ." << endl;
 		// Writes may need to be redirected due to uptodate folder id
-		if (fd >= 0 && should_redirect_fd(fd, NULL, op, redirect_folder.id)) {
+		if (fd >= 0 && should_redirect_fd(fd, NULL, op, new_folder_id)) {
 			close(fd);
 			fd = -1;
 		}
@@ -1336,15 +1336,17 @@ static int do_lookup(InodeRef& parent, const char *name,
 	// Folder id of first level subdirs is their name.
 	// If subdir name is not a decimal number, the folder id is 0.
 	// For all other inodes, it is inheritted from the parent.
-	// With version == 0, we update folder id on open for write.
+	// With version == 0, we always query folder id on open for write,
+	// so we do not need to query folder id of directories in lookup.
 	auto folder = parent.get_folder();
 	auto version = fs.get_folder_id_version();
 	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
 	auto is_folder_root = parent.is_root() && is_subdir;
-	if (is_subdir && version && !is_folder_id_uptodate(parent)) {
-		auto new_folder = fs.get_folder_at(newfd, e->ino);
-		if (new_folder.id) {
-			folder = new_folder;
+	if (is_subdir && version) {
+		auto new_folder_id = fs.get_folder_id_at(newfd, e->ino);
+		if (new_folder_id) {
+			folder.id = new_folder_id;
+			folder.ver = version;
 			if (fs.debug)
 				cerr << "DEBUG: lookup(): '" << name
 					<< "' is root of sub-folder id " << folder.id
@@ -1408,9 +1410,13 @@ static int do_lookup(InodeRef& parent, const char *name,
                                         << " updated." << endl;
 			inode.src_fh = xfs_fh;
 		}
-		// Update folder id in case folder id config has changed, or inode with
-		// unknown folder id may have been reconnected after it was found by LOOKUP "."
-		if (!inode.folder.id || folder.ver > inode.folder.ver) {
+		// Update fodler id on lookup by name, because inode may have been moved,
+		// inode may have been reconnected after it was found by LOOKUP "." or
+		// folder id config of parents may have changed.
+		// We update the inode to parent folder id after rename even if the
+		// parent's folder id is out dated, otherwise inode may remain with an
+		// "uptodate" folder id, but of the wrong parent.
+		if (folder.id != inode.folder.id || folder.ver != inode.folder.ver) {
 			if (fs.debug)
                                 cerr << "DEBUG: lookup(): inode " << src_ino
 					<< " update folder id "
