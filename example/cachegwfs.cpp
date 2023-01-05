@@ -1044,19 +1044,13 @@ static bool is_folder_id_uptodate(InodeRef &inode)
 	return r->folder_id_version == inode.get_folder().ver;
 }
 
-static bool should_open_redirect_fd(InodeRef &inode, enum op op,
-				    bool &redirect_folder_id)
+static bool should_redirect_folder_id(InodeRef &inode, enum op op)
 {
-	// We need redirected fd for copy_file_range()
-	auto redirect_copy = fs.redirect_op(OP_COPY);
-
 	if (op != OP_OPEN_RW)
-		return redirect_copy;
+		return false;
 
 	// We need redirected fd to get uptodate folder id
-	redirect_folder_id = !is_folder_id_uptodate(inode);
-
-	return redirect_folder_id || redirect_copy;
+	return !is_folder_id_uptodate(inode);
 }
 
 static File *fd_open(int fd, bool redirected, enum op op,
@@ -1064,7 +1058,7 @@ static File *fd_open(int fd, bool redirected, enum op op,
 {
 	auto rfd = -1;
 	File *fh = NULL;
-	bool redirect_folder_id = false;
+	bool redirect_folder_id = should_redirect_folder_id(inode, op);
 
 	if (redirected) {
 		// fd is already redirected - swap it with rfd
@@ -1072,7 +1066,7 @@ static File *fd_open(int fd, bool redirected, enum op op,
 		fd = -1;
 	} else if (check_safe_fd(fd, op) == -1) {
 		goto out_err;
-	} else if (should_open_redirect_fd(inode, op, redirect_folder_id)) {
+	} else if (fs.redirect_op(OP_COPY) || redirect_folder_id) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
@@ -1093,7 +1087,7 @@ static File *fd_open(int fd, bool redirected, enum op op,
 				<< redirect_folder.id << ":" << redirect_folder.ver
 				<< "." << endl;
 		// Writes may need to be redirected due to uptodate folder id
-		if (should_redirect_fd(fd, NULL, op, redirect_folder.id)) {
+		if (fd >= 0 && should_redirect_fd(fd, NULL, op, redirect_folder.id)) {
 			close(fd);
 			fd = -1;
 		}
