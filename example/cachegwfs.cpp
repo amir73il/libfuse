@@ -465,8 +465,8 @@ struct Fs {
 	void init_root();
 	int open_by_fh(InodePtr inode);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
-	uint64_t get_folder_id_fd(int fd, __u64 ino);
-	uint64_t get_folder_id_at(int dirfd, __u64 ino);
+	optional<uint64_t> get_folder_id_fd(int fd, __u64 ino);
+	optional<uint64_t> get_folder_id_at(int dirfd, __u64 ino);
 	uint64_t get_folder_id_version() {
 		auto r = redirect();
 		return r->folder_id_version;
@@ -748,34 +748,32 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	return bstat.bs_gen;
 }
 
-uint64_t Fs::get_folder_id_fd(int fd, __u64 ino)
+optional<uint64_t> Fs::get_folder_id_fd(int fd, __u64 ino)
 {
 	auto r = redirect();
 	if (r->folder_id_xattr.empty())
-		return 0;
+		return {};
 
 	int ret;
-	uint64_t folder_id;
+	uint64_t folder_id = 0;
 	ret = fgetxattr(fd, r->folder_id_xattr.c_str(), &folder_id, sizeof(folder_id));
         if (ret == -1) {
-		if (errno != ENODATA) {
-			if (debug)
-				cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
-		}
-		return 0;
+		if (debug && errno != ENODATA)
+			cerr << "DEBUG: failed to get folder id; ino =" << ino << ", errno=" << errno << endl;
+		return {};
 	}
 
-	return folder_id;
+	return {folder_id};
 }
 
-uint64_t Fs::get_folder_id_at(int dirfd, __u64 ino)
+optional<uint64_t> Fs::get_folder_id_at(int dirfd, __u64 ino)
 {
 	// dirfd is O_PATH fd and we need O_RDONLY fd for fgetxattr()
 	auto fd = openat(dirfd, ".", O_DIRECTORY | O_RDONLY);
 	if (fd < 0) {
-		if (debug && errno != ENODATA)
+		if (debug)
 			cerr << "DEBUG: failed to open directory; ino =" << ino << ", errno=" << errno << endl;
-		return 0;
+		return {};
 	}
 
 	int saverr;
@@ -1078,18 +1076,23 @@ static File *fd_open(int fd, bool redirected, enum op op,
 
 	if (redirect_folder_id) {
 		// Get uptodate folder id from redirected fd
-		auto folder = inode.get_folder();
-		auto new_folder_id = fs.get_folder_id_fd(rfd, inode.ino());
-		inode.set_folder(new_folder_id, 0);
-		if (fs.debug)
-			cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
-				<< " update folder id "
-				<< folder.id << ":" << folder.ver << " => "
-				<< new_folder_id << ":0 ." << endl;
-		// Writes may need to be redirected due to uptodate folder id
-		if (fd >= 0 && should_redirect_fd(fd, NULL, op, new_folder_id)) {
-			close(fd);
-			fd = -1;
+		auto folder_id = fs.get_folder_id_fd(rfd, inode.ino());
+
+		if (folder_id.has_value()) {
+			inode.set_folder(folder_id.value(), 0);
+			if (fs.debug)
+				cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
+					<< " folder id = " << folder_id.value() << "." << endl;
+			// Writes may need to be redirected due to folder id value
+			// which is in the redirected folder ids map.
+			// An explicitly found folder id xattr with value 0 (or "")
+			// also indicates that writes needs to be redirected.
+			if (fd >= 0 &&
+			    (!folder_id.value() ||
+			     should_redirect_fd(fd, NULL, op, folder_id.value()))) {
+				close(fd);
+				fd = -1;
+			}
 		}
 	}
 
@@ -1343,9 +1346,9 @@ static int do_lookup(InodeRef& parent, const char *name,
 	auto is_subdir = S_ISDIR(e->attr.st_mode) && !is_dot_or_dotdot(name);
 	auto is_folder_root = parent.is_root() && is_subdir;
 	if (is_subdir && version) {
-		auto new_folder_id = fs.get_folder_id_at(newfd, e->ino);
-		if (new_folder_id) {
-			folder.id = new_folder_id;
+		auto folder_id = fs.get_folder_id_at(newfd, e->ino);
+		if (folder_id.value_or(0)) {
+			folder.id = folder_id.value();
 			folder.ver = version;
 			if (fs.debug)
 				cerr << "DEBUG: lookup(): '" << name
