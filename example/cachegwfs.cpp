@@ -57,6 +57,7 @@
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <fuse_lowlevel.h>
 #include <fuse_helpers.h>
@@ -2241,17 +2242,12 @@ static void sfs_statfs(fuse_req_t req, fuse_ino_t ino) {
 }
 
 
-#ifdef HAVE_POSIX_FALLOCATE
+#ifdef HAVE_FALLOCATE
 static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 		off_t offset, off_t length, fuse_file_info *fi) {
 	(void) ino;
-	if (mode) {
-		fuse_reply_err(req, EOPNOTSUPP);
-		return;
-	}
-
-	auto err = posix_fallocate(get_file_fd(fi), offset, length);
-	fuse_reply_err(req, err);
+	auto res = fallocate(get_file_fd(fi), mode, offset, length);
+	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 #endif
 
@@ -2495,7 +2491,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.read = sfs_read;
 	sfs_oper.write_buf = sfs_write_buf;
 	sfs_oper.statfs = sfs_statfs;
-#ifdef HAVE_POSIX_FALLOCATE
+#ifdef HAVE_FALLOCATE
 	sfs_oper.fallocate = sfs_fallocate;
 #endif
 	sfs_oper.flock = sfs_flock;
