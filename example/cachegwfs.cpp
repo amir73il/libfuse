@@ -2098,6 +2098,12 @@ static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 static void sfs_flush(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	(void) ino;
 	auto res = close(dup(get_file_fd(fi)));
+
+	// Call read() to clear FOPEN_NOFLUSH flag on redirect fd
+	int rfd = get_file(fi)->get_redirect_fd();
+	if (rfd > 0)
+		pread(rfd, NULL, 0, 0);
+
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
