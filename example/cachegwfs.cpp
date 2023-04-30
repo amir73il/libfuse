@@ -353,6 +353,8 @@ static const char *op_name(enum op op) {
 
 // Redirect config that can be changed in runtime
 struct Redirect {
+	time_t read_once_older {0};
+	time_t read_once_grace {0};
 	std::string read_xattr;
 	std::string write_xattr;
 	std::string readdir_xattr;
@@ -373,6 +375,26 @@ struct Redirect {
 	void set_folder_id(uint64_t folder_id) {
 		folder_ids.insert(folder_id);
 	}
+	bool test_folder_id_op(enum op op)
+	{
+		if (op != OP_OPEN_RW)
+			return false;
+
+		// With empty folder_id_xattr, cannot get folder id from redirected fd
+		return !folder_id_xattr.empty();
+	}
+
+	// Either read_once_older or read_once_grace may end up redirecting on read
+	bool read_once_enabled() {
+		return read_once_older || read_once_grace;
+	}
+	bool test_read_once(const struct stat &st) {
+		if (!read_once_enabled())
+			return false;
+		time_t t = read_once_older ?: time(NULL);
+		return st.st_atime <= st.st_mtime ||
+			st.st_atime <= t - read_once_grace;
+	}
 
 	void set_op(const string &name) {
 		auto it = find_if(op_names.begin(), op_names.end(),
@@ -390,6 +412,20 @@ struct Redirect {
 			folder_ids.insert(folder_id);
 		else
 			cerr << "WARNING: illegal redirect folder id " << name << endl;
+	}
+	void set_read_once(const string &name, bool grace) {
+		time_t t = 0;
+		try {
+			t = stoll(name.c_str());
+		} catch (const exception &ex) {
+			cerr << "WARNING: illegal timestamp '" << name << "': " << ex.what() << endl;
+		}
+		if (t < 0)
+			cerr << "WARNING: negative timestamp '" << name << "' is ignored" << endl;
+		else if (grace)
+			read_once_grace = t;
+		else
+			read_once_older = t;
 	}
 };
 
@@ -1005,27 +1041,19 @@ static void fuse_reply_fd_err(fuse_req_t req, int err)
 	fuse_reply_err(req, err);
 }
 
-static bool should_redirect_folder_id(enum op op)
-{
-	if (op != OP_OPEN_RW)
-		return false;
-
-	auto r = fs.redirect();
-	// With empty folder_id_xattr, cannot get folder id from redirected fd
-	return !r->folder_id_xattr.empty();
-}
-
 static File *fd_open(int fd, bool redirected, enum op op,
 		     InodeRef &inode, const char *name, int flags)
 {
 	auto rfd = -1;
 	File *fh = NULL;
-	bool redirect_folder_id = should_redirect_folder_id(op);
+	auto r = fs.redirect();
+	bool redirect_folder_id = r->test_folder_id_op(op);
 
 	if (redirected) {
 		// fd is already redirected - swap it with rfd
 		rfd = fd;
 		fd = -1;
+		goto out;
 	} else if (check_safe_fd(fd, op) == -1) {
 		goto out_err;
 	} else if (fs.redirect_op(OP_COPY) || redirect_folder_id) {
@@ -1035,6 +1063,24 @@ static File *fd_open(int fd, bool redirected, enum op op,
 		rfd = open_redirect_fd(inode.fd, name, flags & ~O_CREAT);
 		if (rfd == -1)
 			goto out_err;
+	}
+
+	if (r->read_once_enabled()) {
+		struct stat st;
+		if (fstatat(inode.fd, name, &st, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+			goto out_err;
+
+		// Now test if this specific file needs to be redirected once
+		if (r->test_read_once(st)) {
+			if (fs.debug)
+				cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
+					<< " redirect once @" << time(NULL) << ","
+					<< " atime=" << st.st_atime << ","
+					<< " mtime=" << st.st_mtime << ","
+					<< " older=" << r->read_once_older << ","
+					<< " grace=" << r->read_once_grace << "." << endl;
+			goto out_redirect;
+		}
 	}
 
 	if (redirect_folder_id) {
@@ -1052,12 +1098,11 @@ static File *fd_open(int fd, bool redirected, enum op op,
 			if (fd >= 0 &&
 			    (folder_id.value() == 0 ||
 			     should_redirect_fd(fd, NULL, op, folder_id.value()))) {
-				close(fd);
-				fd = -1;
+				goto out_redirect;
 			}
 		}
 	}
-
+out:
 	fh = new (nothrow) File(fd, rfd);
 	if (!fh) {
 		errno = ENOMEM;
@@ -1065,6 +1110,11 @@ static File *fd_open(int fd, bool redirected, enum op op,
 	}
 
 	return fh;
+
+out_redirect:
+	close(fd);
+	fd = -1;
+	goto out;
 
 out_err:
 	if (fd >= 0)
@@ -2620,6 +2670,16 @@ static Redirect *read_config_file()
 			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
+		} else if (name == "redirect_read_once_older") {
+			redirect->set_read_once(value, false);
+			redirect->set_op(OP_OPEN_RO);
+			redirect->set_op(OP_OPEN_RW);
+			redirect->set_op(OP_COPY);
+		} else if (name == "redirect_read_once_grace") {
+			redirect->set_read_once(value, true);
+			redirect->set_op(OP_OPEN_RO);
+			redirect->set_op(OP_OPEN_RW);
+			redirect->set_op(OP_COPY);
 		} else if (name == "redirect_op") {
 			redirect->set_op(value);
 		}
