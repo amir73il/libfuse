@@ -1,5 +1,8 @@
 #!/bin/bash
 
+config=/etc/fuse.passthrough.config
+[ -f $config ] && . $config
+
 ulimit -n 1048576
 
 # It would be easier if we could just set SCRATCH_DEV and TEST_DEV to the source directory
@@ -13,5 +16,15 @@ if [ "$dev" = "${SCRATCH_DEV}" ]; then
 else
   source="${TEST_SOURCE}"
 fi
+mnt="$1"
+shift
+# -o
+shift
+mntopts="$1"
+shift
 
-exec "$PASSTHROUGH_PATH" -o fsname=$dev,allow_other "${source}" "$@"
+if ( echo "$mntopts" | grep -q remount ) ; then
+	exec mount -i "$dev" "$mnt" -o "$mntopts"
+fi
+
+exec "$PASSTHROUGH_PATH" -o fsname=$dev,allow_other "${source}" "$mnt" -o "$mntopts" "$@"
