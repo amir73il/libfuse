@@ -1379,6 +1379,7 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
 
 int fuse_passthrough_open(fuse_req_t req, unsigned int fd);
 int fuse_passthrough_close(fuse_req_t req, unsigned int id);
+int fuse_passthrough_setup(fuse_req_t req, unsigned int fd);
 
 /**
  * Reply with open parameters

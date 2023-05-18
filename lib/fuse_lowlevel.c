@@ -466,12 +466,19 @@ int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 	return send_reply_ok(req, linkname, strlen(linkname));
 }
 
+// Test 1-1 direct map between passthrough fd and backing id numbers
+//#define TEST_PASSTHROUGH_FD
+
 int fuse_passthrough_open(fuse_req_t req, unsigned int fd) {
     int ret;
 
+#ifdef TEST_PASSTHROUGH_FD
+    ret = fuse_passthrough_setup(req, fd);
+#else
     ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN, &fd);
     if (ret <= 0)
         fuse_log(FUSE_LOG_ERR, "fuse: passthrough_open: %s\n", strerror(errno));
+#endif
 
     return ret;
 }
@@ -479,11 +486,31 @@ int fuse_passthrough_open(fuse_req_t req, unsigned int fd) {
 int fuse_passthrough_close(fuse_req_t req, unsigned int id) {
     int ret;
 
+#ifdef TEST_PASSTHROUGH_FD
+    ret = 0;
+#else
     ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_CLOSE, &id);
     if (ret <= 0)
         fuse_log(FUSE_LOG_ERR, "fuse: passthrough_close: %s\n", strerror(errno));
+#endif
 
     return ret;
+}
+
+int fuse_passthrough_setup(fuse_req_t req, unsigned int fd)
+{
+	struct fuse_passthrough_setup_in fpts = {
+		.unique = req->unique,
+		.fd = fd,
+	};
+	int ret;
+
+	ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_SETUP, &fpts);
+	if (ret <= 0)
+		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_setup: %s\n",
+			 strerror(errno));
+
+	return ret;
 }
 
 int fuse_reply_open(fuse_req_t req, const struct fuse_file_info *f)
