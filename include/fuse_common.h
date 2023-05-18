@@ -103,7 +103,15 @@ struct fuse_file_info {
 	/** File handle id.  May be filled in by filesystem in create,
 	 * open, and opendir().  Available in most other file operations on the
 	 * same file handle. */
-	uint64_t fh;
+	union {
+		uint64_t fh;
+		/* Passthough fd and backing id */
+		struct {
+			uint32_t fd;
+			uint32_t id;
+		};
+	};
+
 
 	/** Passthrough file handle id.  May be filled in by filesystem in
 	 * create and open.  It is used to create a passthrough connection

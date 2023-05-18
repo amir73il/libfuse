@@ -1377,7 +1377,8 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
  */
 int fuse_reply_readlink(fuse_req_t req, const char *link);
 
-int fuse_passthrough_enable(fuse_req_t req, unsigned int fd);
+int fuse_passthrough_open(fuse_req_t req, unsigned int fd);
+int fuse_passthrough_close(fuse_req_t req, unsigned int id);
 
 /**
  * Reply with open parameters

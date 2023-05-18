@@ -466,12 +466,22 @@ int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 	return send_reply_ok(req, linkname, strlen(linkname));
 }
 
-int fuse_passthrough_enable(fuse_req_t req, unsigned int fd) {
+int fuse_passthrough_open(fuse_req_t req, unsigned int fd) {
     int ret;
 
     ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN, &fd);
     if (ret <= 0)
-        fuse_log(FUSE_LOG_ERR, "fuse: passthrough_enable: %s\n", strerror(errno));
+        fuse_log(FUSE_LOG_ERR, "fuse: passthrough_open: %s\n", strerror(errno));
+
+    return ret;
+}
+
+int fuse_passthrough_close(fuse_req_t req, unsigned int id) {
+    int ret;
+
+    ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_CLOSE, &id);
+    if (ret <= 0)
+        fuse_log(FUSE_LOG_ERR, "fuse: passthrough_close: %s\n", strerror(errno));
 
     return ret;
 }

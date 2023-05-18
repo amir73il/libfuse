@@ -242,7 +242,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 
     if (valid & FUSE_SET_ATTR_MODE) {
         if (fi) {
-            res = fchmod(fi->fh, attr->st_mode);
+            res = fchmod(fi->fd, attr->st_mode);
         } else {
             char procname[64];
             sprintf(procname, "/proc/self/fd/%i", ifd);
@@ -261,7 +261,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
     }
     if (valid & FUSE_SET_ATTR_SIZE) {
         if (fi) {
-            res = ftruncate(fi->fh, attr->st_size);
+            res = ftruncate(fi->fd, attr->st_size);
         } else {
             char procname[64];
             sprintf(procname, "/proc/self/fd/%i", ifd);
@@ -289,7 +289,7 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
             tv[1] = attr->st_mtim;
 
         if (fi)
-            res = futimens(fi->fh, tv);
+            res = futimens(fi->fd, tv);
         else {
 #ifdef HAVE_UTIMENSAT
             char procname[64];
@@ -828,7 +828,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
         return;
     }
 
-    fi->fh = fd;
+    fi->fd = fd;
     fuse_entry_param e;
     auto err = do_lookup(parent, name, &e);
     if (err) {
@@ -838,13 +838,14 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
         return;
     }
 
+    fi->id = fi->passthrough_fh = 0;
     if (fs.passthrough) {
-        int passthrough_fh = fuse_passthrough_enable(req, fd);
+        int passthrough_fh = fuse_passthrough_open(req, fd);
         if (passthrough_fh <= 0) {
-            cerr << "DEBUG: fuse_passthrough_enable returned: " << passthrough_fh << endl;
+            cerr << "DEBUG: fuse_passthrough_open returned: " << passthrough_fh << endl;
 	    fs.passthrough = false;
 	} else {
-            fi->passthrough_fh = passthrough_fh;
+            fi->id = fi->passthrough_fh = passthrough_fh;
 	}
     }
 
@@ -904,14 +905,15 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     inode.nopen++;
     fi->keep_cache = (fs.timeout != 0);
     fi->noflush = (fs.timeout == 0 && (fi->flags & O_ACCMODE) == O_RDONLY);
-    fi->fh = fd;
+    fi->fd = fd;
+    fi->id = fi->passthrough_fh = 0;
     if (fs.passthrough) {
-        int passthrough_fh = fuse_passthrough_enable(req, fd);
+        int passthrough_fh = fuse_passthrough_open(req, fd);
         if (passthrough_fh <= 0) {
-            cerr << "DEBUG: fuse_passthrough_enable returned: " << passthrough_fh << endl;
+            cerr << "DEBUG: fuse_passthrough_open returned: " << passthrough_fh << endl;
 	    fs.passthrough = false;
 	} else {
-            fi->passthrough_fh = passthrough_fh;
+            fi->id = fi->passthrough_fh = passthrough_fh;
 	}
     }
     fuse_reply_open(req, fi);
@@ -922,14 +924,16 @@ static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     Inode& inode = get_inode(ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen--;
-    close(fi->fh);
+    close(fi->fd);
+    if (fi->id)
+        fuse_passthrough_close(req, fi->id);
     fuse_reply_err(req, 0);
 }
 
 
 static void sfs_flush(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     (void) ino;
-    auto res = close(dup(fi->fh));
+    auto res = close(dup(fi->fd));
     fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
@@ -939,9 +943,9 @@ static void sfs_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
     (void) ino;
     int res;
     if (datasync)
-        res = fdatasync(fi->fh);
+        res = fdatasync(fi->fd);
     else
-        res = fsync(fi->fh);
+        res = fsync(fi->fd);
     fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
@@ -951,7 +955,7 @@ static void do_read(fuse_req_t req, size_t size, off_t off, fuse_file_info *fi) 
     fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
     buf.buf[0].flags = static_cast<fuse_buf_flags>(
         FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK);
-    buf.buf[0].fd = fi->fh;
+    buf.buf[0].fd = fi->fd;
     buf.buf[0].pos = off;
 
     fuse_reply_data(req, &buf, FUSE_BUF_COPY_FLAGS);
@@ -969,7 +973,7 @@ static void do_write_buf(fuse_req_t req, size_t size, off_t off,
     fuse_bufvec out_buf = FUSE_BUFVEC_INIT(size);
     out_buf.buf[0].flags = static_cast<fuse_buf_flags>(
         FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK);
-    out_buf.buf[0].fd = fi->fh;
+    out_buf.buf[0].fd = fi->fd;
     out_buf.buf[0].pos = off;
 
     auto res = fuse_buf_copy(&out_buf, in_buf, FUSE_BUF_COPY_FLAGS);
@@ -1008,7 +1012,7 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
         return;
     }
 
-    auto err = posix_fallocate(fi->fh, offset, length);
+    auto err = posix_fallocate(fi->fd, offset, length);
     fuse_reply_err(req, err);
 }
 #endif
@@ -1016,7 +1020,7 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
                       int op) {
     (void) ino;
-    auto res = flock(fi->fh, op);
+    auto res = flock(fi->fd, op);
     fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
