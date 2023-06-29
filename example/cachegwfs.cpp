@@ -1702,6 +1702,8 @@ static enum op redirect_rename_op(int dirfd, const char *name)
 	return path_is_dir(dirfd, name) ? OP_MVDIR : OP_RENAME;
 }
 
+static void forget_one(fuse_ino_t ino, uint64_t n);
+
 static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_ino_t newparent, const char *newname,
 		unsigned int flags) {
@@ -1728,6 +1730,8 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	// Lookup to update new parent in connectable file handle of moved inode
 	fuse_entry_param e;
 	auto err = do_lookup(inode_np, newname, &e);
+	if (!err)
+		forget_one(e.ino, 1);
 	fuse_reply_err(req, err);
 }
 
