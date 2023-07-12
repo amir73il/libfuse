@@ -455,6 +455,7 @@ struct Fs {
 	bool wbcache;
 	bool keepcache;
 	bool rwpassthrough;
+	bool readdirpassthrough;
 	bool ino32 {false};
 	bool bulkstat {true};
 	int at_connectable {0};
@@ -1160,7 +1161,7 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 		if (conn->capable & FUSE_CAP_PASSTHROUGH)
 			conn->want |= FUSE_CAP_PASSTHROUGH;
 		else
-			fs.rwpassthrough = false;
+			fs.readdirpassthrough = fs.rwpassthrough = false;
 	}
 	cout << "kernel read/write passthrough "
 		<< (fs.rwpassthrough ? "enabled" : "disabled" ) << endl;
@@ -1880,6 +1881,17 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	d->offset = 0;
 
 	fi->fh = reinterpret_cast<uint64_t>(d);
+	if (fs.readdirpassthrough || (fi->flags & O_SYNC && fs.rwpassthrough)) {
+		// readdir passthrough is beneficial when readdirplus is not needed
+		// O_SYNC flag is a hint from samba that readdirplus is not needed
+		// and use readdir passthrough to speed up case insensitive name lookup
+		int passthrough_fh = fuse_passthrough_enable(req, fd);
+		if (passthrough_fh > 0)
+			fi->passthrough_fh = passthrough_fh;
+		else if (fs.debug)
+			cerr << "DEBUG: fuse_passthrough_enable returned: "
+				<< passthrough_fh << endl;
+	}
 	if (fs.keepcache) {
 		fi->keep_cache = 1;
 		fi->cache_readdir = 1;
@@ -2543,6 +2555,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("nokeepfd", "Do not keep open fd for all inodes in cache")
 		("nokeepcache", "Do not keep page cache on open file")
 		("norwpassthrough", "Do not use pass-through mode for read/write")
+		("readdirpassthrough", "Use pass-through mode for readdir")
 		("max_idle_threads", "Size of thread pool", cxxopts::value<int>(), "N")
 		("single", "Run single-threaded");
 
@@ -2568,6 +2581,17 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 	fs.attr_timeout = fs.nocache ? 0 : 1.0;
 	fs.entry_timeout = fs.attr_timeout;
 	fs.rwpassthrough = options.count("norwpassthrough") == 0;
+	fs.readdirpassthrough = options.count("readdirpassthrough") != 0;
+	// --nokeepfd options is used to reduce inode cache usage.
+	// When using FUSE passtrhough, page cache is not used anyway,
+	// and we can further reduce inode cache usage
+	// by enabling readdir passthrough
+	// and disabling readdirplus and readdir cache.
+	if (fs.rwpassthrough && fs.nokeepfd) {
+		fs.readdirpassthrough = true;
+		fs.keepcache = false;
+	}
+
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {
 		cerr << "realpath(" << argv[1] << ") failed: " << strerror(errno) << endl;
