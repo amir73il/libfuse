@@ -403,7 +403,10 @@ static void fill_open(struct fuse_open_out *arg,
 	arg->fh = f->fh;
 	if (f->passthrough) {
 		arg->backing_id = f->backing_id;
-		arg->open_flags |= FOPEN_PASSTHROUGH_AUTO_CLOSE;
+		arg->open_flags |= FOPEN_PASSTHROUGH;
+		/* backing_id 0 is server managed inode shared backing file */
+		if (f->backing_id)
+			arg->open_flags |= FOPEN_CLOSE_BACKING_ID;
 	}
 	if (f->direct_io)
 		arg->open_flags |= FOPEN_DIRECT_IO;
@@ -471,9 +474,14 @@ int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 	return send_reply_ok(req, linkname, strlen(linkname));
 }
 
-int fuse_passthrough_open(fuse_req_t req, struct fuse_file_info *f, int fd)
+int fuse_passthrough_open(fuse_req_t req, struct fuse_file_info *f, int fd,
+			  fuse_ino_t ino)
 {
-	struct fuse_backing_map map = { .fd = fd, .flags = FUSE_BACKING_MAP_ID };
+	struct fuse_backing_map map = {
+		.fd = fd,
+		.nodeid = ino,
+		.flags = ino ? FUSE_BACKING_MAP_INODE : FUSE_BACKING_MAP_ID,
+	};
 	int ret;
 
 	ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_OPEN, &map);
@@ -484,6 +492,21 @@ int fuse_passthrough_open(fuse_req_t req, struct fuse_file_info *f, int fd)
 		f->backing_id = map.backing_id;
 		f->passthrough = 1;
 	}
+
+	return ret;
+}
+
+int fuse_passthrough_close(fuse_req_t req, fuse_ino_t ino)
+{
+	struct fuse_backing_map map = {
+		.nodeid = ino,
+		.flags = FUSE_BACKING_MAP_INODE,
+	};
+	int ret;
+
+	ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_CLOSE, &map);
+	if (ret < 0)
+		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_close: %s\n", strerror(errno));
 
 	return ret;
 }

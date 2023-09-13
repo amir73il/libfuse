@@ -1381,6 +1381,14 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
 /**
  * Setup passthrough backing file for open reply
  *
+ * When setting up a unique backing file (ino=0), the kernel will attach the
+ * backing file to the fuse file and close it on release of the fuse file.
+ *
+ * When setting up an inode shared backing file, the server is resposible to
+ * setup one backing file per inode and to close it explicitly by calling
+ * fuse_passthrough_close() when the shared backing file is no longer needed.
+ * The kernel will also close the inode shared backing file on inode evict.
+ *
  * currently the following members of 'fi' are used:
  *   passthrough, backing_id
  *
@@ -1390,9 +1398,12 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
  * @param req request handle
  * @param fi file information
  * @param fd backing file descrptor
+ * @param ino multiple opens of this inode can share the backing file
  * @return zero for success, -errno for failure
  */
-int fuse_passthrough_open(fuse_req_t req, struct fuse_file_info *fi, int fd);
+int fuse_passthrough_open(fuse_req_t req, struct fuse_file_info *fi, int fd,
+			  fuse_ino_t ino);
+int fuse_passthrough_close(fuse_req_t req, fuse_ino_t ino);
 
 /**
  * Reply with open parameters
