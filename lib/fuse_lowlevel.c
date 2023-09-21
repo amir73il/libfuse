@@ -487,6 +487,17 @@ int fuse_passthrough_open(fuse_req_t req, int fd)
 	return ret;
 }
 
+int fuse_passthrough_close(fuse_req_t req, int backing_id)
+{
+	int ret;
+
+	ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_CLOSE, backing_id);
+	if (ret < 0)
+		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_close: %s\n", strerror(errno));
+
+	return ret;
+}
+
 int fuse_reply_open(fuse_req_t req, const struct fuse_file_info *f)
 {
 	struct fuse_open_out arg;

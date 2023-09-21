@@ -1392,6 +1392,7 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
  * @return positive backing id for success, 0 for failure
  */
 int fuse_passthrough_open(fuse_req_t req, int fd);
+int fuse_passthrough_close(fuse_req_t req, int backing_id);
 
 /**
  * Reply with open parameters

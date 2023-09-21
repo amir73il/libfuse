@@ -123,6 +123,7 @@ struct Inode {
     dev_t src_dev {0};
     ino_t src_ino {0};
     int generation {0};
+    int backing_id {0};
     uint64_t nopen {0};
     uint64_t nlookup {0};
     std::mutex m;
@@ -875,6 +876,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
     /* With writeback cache, kernel may send read requests even
        when userspace opened write-only */
+    auto rdonly = (fi->flags & O_ACCMODE) == O_RDONLY;
     if (fs.timeout && (fi->flags & O_ACCMODE) == O_WRONLY) {
         fi->flags &= ~O_ACCMODE;
         fi->flags |= O_RDWR;
@@ -905,15 +907,28 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     lock_guard<mutex> g {inode.m};
     inode.nopen++;
     fi->keep_cache = (fs.timeout != 0);
-    fi->noflush = (fs.timeout == 0 && (fi->flags & O_ACCMODE) == O_RDONLY);
+    fi->noflush = (fs.timeout == 0 && rdonly);
     fi->fh = fd;
 
     if (fs.passthrough) {
-        fi->backing_id = fuse_passthrough_open(req, fd);
+        /* Setup a shared rdonly backing file on first rdonly open of an inode */
+        if (rdonly && inode.backing_id) {
+            cerr << "DEBUG: fuse_passthrough_open " << inode.backing_id
+		 << " reusing shared for inode " << ino << endl;
+            fi->backing_id = inode.backing_id;
+            fi->keep_backing_id = true;
+        } else {
+            fi->backing_id = fuse_passthrough_open(req, fd);
+        }
         if (!fi->backing_id) {
-            cerr << "DEBUG: fuse_passthrough_open failed"
+            cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
                  << ", disabling rw passthrough." << endl;
             fs.passthrough = false;
+        } else if (rdonly) {
+            cerr << "DEBUG: fuse_passthrough_open " << fi->backing_id
+		 << " shared for inode " << ino << endl;
+            inode.backing_id = fi->backing_id;
+            fi->keep_backing_id = true;
         } else {
             cerr << "DEBUG: fuse_passthrough_open " << fi->backing_id << endl;
         }
@@ -927,6 +942,15 @@ static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     Inode& inode = get_inode(ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen--;
+
+    /* Close the shared rdonly backing file on last file close of an inode */
+    if (inode.backing_id && !inode.nopen) {
+        if (fuse_passthrough_close(req, inode.backing_id) < 0) {
+            cerr << "DEBUG: fuse_passthrough_close failed for inode " << ino << endl;
+        }
+        inode.backing_id = 0;
+    }
+
     close(fi->fh);
     fuse_reply_err(req, 0);
 }
