@@ -443,6 +443,7 @@ struct Fs {
 	uid_t uid;
 	gid_t gid;
 	double timeout;
+	double entry_timeout;
 	bool debug;
 	std::string source;
 	std::string redirect_path;
@@ -1269,7 +1270,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 			<< ", parent_folder_id=" << parent.folder_id() << endl;
 	memset(e, 0, sizeof(*e));
 	e->attr_timeout = fs.timeout;
-	e->entry_timeout = fs.timeout;
+	e->entry_timeout = fs.entry_timeout;
 
 	int newfd;
 	if (strcmp(name, ".") == 0) {
@@ -1501,7 +1502,7 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 	auto err = do_lookup(inode_ref, name, &e);
 	if (err == ENOENT) {
 		e.attr_timeout = fs.timeout;
-		e.entry_timeout = fs.timeout;
+		e.entry_timeout = fs.entry_timeout;
 		e.ino = e.attr.st_ino = 0;
 		fuse_reply_entry(req, &e);
 	} else if (err) {
@@ -2657,6 +2658,10 @@ static Redirect *read_config_file()
 		std::cout << name << " = " << value << std::endl;
 		if (name == "debug") {
 			debug = std::stoi(value);
+		} else if (name == "attr_timeout") {
+			fs.timeout = std::stoi(value);
+		} else if (name == "entry_timeout") {
+			fs.entry_timeout = std::stoi(value);
 		} else if (name == "redirect_read_xattr") {
 			// Implies also redirect_readdir_xattr
 			redirect->read_xattr = value;
@@ -2758,6 +2763,7 @@ int main(int argc, char *argv[]) {
 	// Initialize filesystem root
 	fs.init_root();
 	fs.timeout = options.count("nocache") ? 0 : 1.0;
+	fs.entry_timeout = fs.timeout;
 
 	// Initialize fuse
 	auto ret = -1;
