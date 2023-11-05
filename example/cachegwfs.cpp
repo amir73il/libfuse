@@ -442,7 +442,7 @@ struct Fs {
 	InodePtr root;
 	uid_t uid;
 	gid_t gid;
-	double timeout;
+	double attr_timeout;
 	double entry_timeout;
 	bool debug;
 	std::string source;
@@ -453,6 +453,7 @@ struct Fs {
 	bool nosplice;
 	bool nocache;
 	bool wbcache;
+	bool keepcache;
 	bool rwpassthrough;
 	bool ino32 {false};
 	bool bulkstat {true};
@@ -1179,7 +1180,7 @@ static void sfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		fuse_reply_err(req, errno);
 		return;
 	}
-	fuse_reply_attr(req, &attr, fs.timeout);
+	fuse_reply_attr(req, &attr, fs.attr_timeout);
 }
 
 
@@ -1269,7 +1270,7 @@ static int do_lookup(InodeRef& parent, const char *name,
 			<< ", parent_ino=" << parent.ino()
 			<< ", parent_folder_id=" << parent.folder_id() << endl;
 	memset(e, 0, sizeof(*e));
-	e->attr_timeout = fs.timeout;
+	e->attr_timeout = fs.attr_timeout;
 	e->entry_timeout = fs.entry_timeout;
 
 	int newfd;
@@ -1501,7 +1502,7 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
 	auto err = do_lookup(inode_ref, name, &e);
 	if (err == ENOENT) {
-		e.attr_timeout = fs.timeout;
+		e.attr_timeout = fs.attr_timeout;
 		e.entry_timeout = fs.entry_timeout;
 		e.ino = e.attr.st_ino = 0;
 		fuse_reply_entry(req, &e);
@@ -1879,9 +1880,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	d->offset = 0;
 
 	fi->fh = reinterpret_cast<uint64_t>(d);
-	if (fs.timeout) {
-		// TODO: implement "auto_cache" like logic and/or invalidate
-		// readdir cache on FAN_DIR_MODIFY
+	if (fs.keepcache) {
 		fi->keep_cache = 1;
 		fi->cache_readdir = 1;
 	}
@@ -2143,9 +2142,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 				<< passthrough_fh << endl;
 	}
 
-	// TODO: implement "auto_cache" logic and/or invalidate file data cache
-	// on FAN_MODIFY
-	fi->keep_cache = (fs.timeout != 0);
+	fi->keep_cache = fs.keepcache;
 	fi->noflush = (!fs.wbcache && op == OP_OPEN_RO);
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	fuse_reply_open(req, fi);
@@ -2544,6 +2541,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 		("wbcache", "Enable writeback cache")
 		("nosplice", "Do not use splice(2) to transfer data")
 		("nokeepfd", "Do not keep open fd for all inodes in cache")
+		("nokeepcache", "Do not keep page cache on open file")
 		("norwpassthrough", "Do not use pass-through mode for read/write")
 		("max_idle_threads", "Size of thread pool", cxxopts::value<int>(), "N")
 		("single", "Run single-threaded");
@@ -2564,8 +2562,11 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv) {
 
 	fs.nosplice = options.count("nosplice") != 0;
 	fs.nokeepfd = options.count("nokeepfd") != 0;
-	if (options.count("nocache") == 0)
-		fs.wbcache = options.count("wbcache") != 0;
+	fs.nocache = options.count("nocache") != 0;
+	fs.wbcache = !fs.nocache && options.count("wbcache") != 0;
+	fs.keepcache = !fs.nocache && options.count("nokeepcache") == 0;
+	fs.attr_timeout = fs.nocache ? 0 : 1.0;
+	fs.entry_timeout = fs.attr_timeout;
 	fs.rwpassthrough = options.count("norwpassthrough") == 0;
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {
@@ -2659,7 +2660,7 @@ static Redirect *read_config_file()
 		if (name == "debug") {
 			debug = std::stoi(value);
 		} else if (name == "attr_timeout") {
-			fs.timeout = std::stoi(value);
+			fs.attr_timeout = std::stoi(value);
 		} else if (name == "entry_timeout") {
 			fs.entry_timeout = std::stoi(value);
 		} else if (name == "redirect_read_xattr") {
@@ -2762,8 +2763,6 @@ int main(int argc, char *argv[]) {
 
 	// Initialize filesystem root
 	fs.init_root();
-	fs.timeout = options.count("nocache") ? 0 : 1.0;
-	fs.entry_timeout = fs.timeout;
 
 	// Initialize fuse
 	auto ret = -1;
