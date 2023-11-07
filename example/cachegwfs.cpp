@@ -1865,7 +1865,7 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 	string path;
 	int dirfd = get_fd_path_at(inode.fd, ".", OP_OPENDIR, path);
-	auto fd = openat(dirfd, path.c_str(), O_RDONLY);
+	auto fd = openat(dirfd, path.c_str(), fi->flags & ~O_NOFOLLOW);
 	if (fd == -1)
 		goto out_errno;
 
