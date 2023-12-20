@@ -309,6 +309,7 @@ enum op {
 	OP_CHOWN,
 	OP_TRUNCATE,
 	OP_UTIMENS,
+	// "writedir" operations on parent directory
 	OP_LINK,
 	OP_RENAME,
 	OP_UNLINK,
@@ -317,6 +318,7 @@ enum op {
 	OP_MVDIR,
 	OP_RMDIR,
 	OP_MKNOD,
+	// redirect for specific xattr name prefixes
 	OP_GETXATTR,
 	OP_SETXATTR,
 	// redirect fd opened in open() and used in copy_file_range()
@@ -362,6 +364,7 @@ struct Redirect {
 	std::string read_xattr;
 	std::string write_xattr;
 	std::string readdir_xattr;
+	std::string writedir_xattr;
 	std::string folder_id_xattr;
 	vector<string> xattr_prefixes;
 	std::unordered_set<enum op> ops; // fs operations to redirect
@@ -603,6 +606,17 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 	case OP_OPEN_RW:
 		rw = true;
 		break;
+	case OP_MKNOD:
+	case OP_MKDIR:
+	case OP_RMDIR:
+	case OP_MVDIR:
+	case OP_LINK:
+	case OP_UNLINK:
+	case OP_RENAME:
+	case OP_SYMLINK:
+		rw = true;
+		is_dir = true;
+		break;
 	default:
 		return fs.redirect_op(op);
 	}
@@ -613,7 +627,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 		return true;
 
 	// redirect read/write file/dir if it has stub xattr
-	const string &redirect_xattr = rw ? r->write_xattr :
+	const string &redirect_xattr = rw ?
+		(is_dir ? r->writedir_xattr : r->write_xattr) :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
 	if (redirect_xattr.empty())
 		return false;
@@ -2709,6 +2724,8 @@ static Redirect *read_config_file()
 			redirect->readdir_xattr = value;
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
+		} else if (name == "redirect_writedir_xattr") {
+			redirect->writedir_xattr = value;
 		} else if (name == "redirect_folder_id_xattr") {
 			redirect->folder_id_xattr = value;
 		} else if (name == "redirect_write_folder_id") {
