@@ -310,6 +310,7 @@ enum op {
 	OP_TRUNCATE,
 	OP_UTIMENS,
 	// "writedir" operations on parent directory
+	OP_CREATE,
 	OP_LINK,
 	OP_RENAME,
 	OP_UNLINK,
@@ -338,6 +339,7 @@ const std::map<enum op, const char *> op_names = {
 	{ OP_CHOWN, "chown" },
 	{ OP_TRUNCATE, "truncate" },
 	{ OP_UTIMENS, "utimens" },
+	{ OP_CREATE, "create" },
 	{ OP_MKDIR, "mkdir" },
 	{ OP_MVDIR, "mvdir" },
 	{ OP_RMDIR, "rmdir" },
@@ -606,6 +608,14 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 	case OP_OPEN_RW:
 		rw = true;
 		break;
+	case OP_CREATE:
+		// create() is implemented as open(dirfd, name, O_RDWR | O_CREAT)
+		// there is no point in testing stub xattr on dirfd, we only need
+		// to test stub xattr on dirfd, but we do need to check if the
+		// redirect_op = open_rw rule exists and redirect create() in that case.
+		if (fs.redirect_op(OP_OPEN_RW))
+			return true;
+		// fallthrough
 	case OP_MKNOD:
 	case OP_MKDIR:
 	case OP_RMDIR:
@@ -2064,10 +2074,10 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 }
 
 
-static int do_create(fuse_req_t req, InodeRef &inode_p, const char *name, enum op op,
+static int do_create(fuse_req_t req, InodeRef &inode_p, const char *name,
 		     int flags, mode_t mode, bool &redirected) {
 	string path;
-	auto dirfd = get_fd_path_at(inode_p.fd, name, op, path, inode_p.folder_id());
+	auto dirfd = get_fd_path_at(inode_p.fd, name, OP_CREATE, path, inode_p.folder_id());
 	redirected = IS_REDIRECETED(dirfd);
 	return as_user(req, dirfd, path, __func__, [&](){
 			return openat(dirfd, path.c_str(), (flags | O_CREAT) & ~O_NOFOLLOW, mode);
@@ -2080,15 +2090,15 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	if (inode_p.error(req))
 		return;
 
-	enum op op = redirect_open_op(fi->flags);
 	bool redirected;
-	auto fd = do_create(req, inode_p, name, op, fi->flags, mode, redirected);
+	auto fd = do_create(req, inode_p, name, fi->flags, mode, redirected);
 	if (fd == -1) {
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
 
-	auto fh = fd_open(fd, redirected, op, inode_p, name, fi->flags);
+	// We already did the OP_CREATE, now doing OP_OPEN_RW
+	auto fh = fd_open(fd, redirected, OP_OPEN_RW, inode_p, name, fi->flags);
 	if (!fh) {
 		fuse_reply_fd_err(req, errno);
 		return;
