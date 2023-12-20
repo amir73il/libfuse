@@ -319,7 +319,9 @@ enum op {
 	OP_MKNOD,
 	OP_GETXATTR,
 	OP_SETXATTR,
+	// redirect fd opened in open() and used in copy_file_range()
 	OP_COPY,
+	// redirect all ops with --redirect cmdline option
 	OP_ALL,
 };
 
@@ -573,38 +575,48 @@ void Inode::closefd()
 	}
 }
 
-// Check if this is an empty place holder (a.k.a stub file).
-// See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
+// Check if the operation @op was configured with redirect_op rule
+// or if this file/directory is an empty place holder (a.k.a stub)
+// Return true if any of the above conditions are met.
 static bool should_redirect_fd(int fd, const char *procname, enum op op,
 				uint64_t folder_id)
 {
 	if (op == OP_FD_PATH)
 		return false;
 
+	// redirect all ops with --redirect cmdline option
 	if (fs.redirect_op(OP_ALL))
 		return true;
 
-	if (!fs.redirect_op(op))
-		return false;
-
-	bool rw = false, is_dir = false;
-	if (op == OP_OPENDIR || op == OP_LOOKUP)
-		is_dir = true;
-	else if (op == OP_OPEN_RO)
-		rw = false;
-	else if (op == OP_OPEN_RW)
-		rw = true;
-	else
+	// redirect specific op with config redirect_op = <op name>
+	if (fs.redirect_op(op))
 		return true;
 
+	bool rw = false, is_dir = false;
+	switch (op) {
+	case OP_OPENDIR:
+	case OP_LOOKUP:
+		is_dir = true;
+		break;
+	case OP_OPEN_RO:
+		break;
+	case OP_OPEN_RW:
+		rw = true;
+		break;
+	default:
+		return fs.redirect_op(op);
+	}
+
+	// redirect write by folder id (e.g. over quota)
 	auto r = fs.redirect();
 	if (rw && folder_id && r->test_folder_id(folder_id))
 		return true;
 
+	// redirect read/write file/dir if it has stub xattr
 	const string &redirect_xattr = rw ? r->write_xattr :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
 	if (redirect_xattr.empty())
-		return true;
+		return false;
 
 	ssize_t res;
 	if (procname)
@@ -1053,6 +1065,8 @@ static File *fd_open(int fd, bool redirected, enum op op,
 	File *fh = NULL;
 	auto r = fs.redirect();
 	bool redirect_folder_id = r->test_folder_id_op(op);
+	bool open_rfd = fs.redirect_op(OP_COPY) || redirect_folder_id ||
+			r->read_once_enabled();
 
 	if (redirected) {
 		// fd is already redirected - swap it with rfd
@@ -1061,7 +1075,7 @@ static File *fd_open(int fd, bool redirected, enum op op,
 		goto out;
 	} else if (check_safe_fd(fd, op) == -1) {
 		goto out_err;
-	} else if (fs.redirect_op(OP_COPY) || redirect_folder_id) {
+	} else if (open_rfd) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
@@ -2691,33 +2705,20 @@ static Redirect *read_config_file()
 			// Implies also redirect_readdir_xattr
 			redirect->read_xattr = value;
 			redirect->readdir_xattr = value;
-			redirect->set_op(OP_OPEN_RO);
-			redirect->set_op(OP_OPENDIR);
-			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_readdir_xattr") {
 			redirect->readdir_xattr = value;
-			redirect->set_op(OP_OPENDIR);
-			redirect->set_op(OP_LOOKUP);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr = value;
-			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_folder_id_xattr") {
 			redirect->folder_id_xattr = value;
 		} else if (name == "redirect_write_folder_id") {
 			redirect->set_folder_id(value);
-			redirect->set_op(OP_OPEN_RW);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
 		} else if (name == "redirect_read_once_older") {
 			redirect->set_read_once(value, false);
-			redirect->set_op(OP_OPEN_RO);
-			redirect->set_op(OP_OPEN_RW);
-			redirect->set_op(OP_COPY);
 		} else if (name == "redirect_read_once_grace") {
 			redirect->set_read_once(value, true);
-			redirect->set_op(OP_OPEN_RO);
-			redirect->set_op(OP_OPEN_RW);
-			redirect->set_op(OP_COPY);
 		} else if (name == "redirect_op") {
 			redirect->set_op(value);
 		}
