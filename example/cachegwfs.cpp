@@ -1223,6 +1223,20 @@ static void sfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	fuse_reply_attr(req, &attr, fs.attr_timeout);
 }
 
+static int as_user(fuse_req_t req, int dirfd, const string &path,
+		   const string &opname, function<int()> op, bool chown);
+
+static int do_utimensat(fuse_req_t req, InodeRef &inode, struct timespec tv[2]) {
+#ifdef HAVE_UTIMENSAT
+	auto path = inode.get_path(OP_UTIMENS);
+	return as_user(req, AT_FDCWD, path, __func__, [path, tv](){
+			return utimensat(AT_FDCWD, path, tv, 0);
+		}, false);
+#else
+	errno = EOPNOTSUPP;
+	return -1;
+#endif
+}
 
 static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		int valid, struct fuse_file_info* fi) {
@@ -1278,14 +1292,8 @@ static void do_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 
 		if (fi)
 			res = futimens(get_file_fd(fi), tv);
-		else {
-#ifdef HAVE_UTIMENSAT
-			res = utimensat(AT_FDCWD, inode.get_path(OP_UTIMENS), tv, 0);
-#else
-			res = -1;
-			errno = EOPNOTSUPP;
-#endif
-		}
+		else
+			res = do_utimensat(req, inode, tv);
 		if (res == -1)
 			goto out_err;
 	}
@@ -1584,7 +1592,7 @@ static tuple<bool, gid_t, gid_t> get_sgid_and_gids(int dirfd, const string &path
 
 // Assumes that op returns -1 on failure
 static int as_user(fuse_req_t req, int dirfd, const string &path,
-		const string &opname, function<int()> op)
+		   const string &opname, function<int()> op, bool chown = true)
 {
 	auto c = fuse_req_ctx(req);
 
@@ -1617,7 +1625,7 @@ static int as_user(fuse_req_t req, int dirfd, const string &path,
 
 	auto opret = op();
 
-	if (opret == -1)
+	if (opret == -1 || !chown)
 		return opret;
 
 	auto operrno = errno;
