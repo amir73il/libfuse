@@ -2519,6 +2519,21 @@ static void sfs_copy_file_range(fuse_req_t req,
 }
 
 
+static void sfs_lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
+		      struct fuse_file_info *fi)
+{
+	auto fd = get_file(fi)->get_fd();
+	off_t res;
+
+	(void)ino;
+	res = lseek(fd, off, whence);
+	if (res != -1)
+		fuse_reply_lseek(req, res);
+	else
+		fuse_reply_err(req, errno);
+}
+
+
 static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.init = sfs_init;
 	sfs_oper.lookup = sfs_lookup;
@@ -2556,6 +2571,7 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.removexattr = sfs_removexattr;
 #endif
 	sfs_oper.copy_file_range = sfs_copy_file_range;
+	sfs_oper.lseek = sfs_lseek;
 }
 
 static void print_usage(cxxopts::Options& parser, char *prog_name) {
