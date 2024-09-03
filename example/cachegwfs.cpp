@@ -2210,21 +2210,16 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 {
 	(void) ino;
+	if (fi->flush) {
+		// Call read() to set FOPEN_ASYNC_FLUSH flag on redirect fd
+		int rfd = get_file(fi)->get_redirect_fd();
+		if (rfd > 0)
+			pread(rfd, NULL, 0, 0);
+		if (fs.debug)
+			cerr << "DEBUG: fuse_release post io - async flush" << endl;
+	}
 	release_file_handle(fi);
 	fuse_reply_err(req, 0);
-}
-
-
-static void sfs_flush(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
-	(void) ino;
-	auto res = close(dup(get_file_fd(fi)));
-
-	// Call read() to clear FOPEN_NOFLUSH flag on redirect fd
-	int rfd = get_file(fi)->get_redirect_fd();
-	if (rfd > 0)
-		pread(rfd, NULL, 0, 0);
-
-	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
 
@@ -2544,7 +2539,6 @@ static void assign_operations(fuse_lowlevel_ops &sfs_oper) {
 	sfs_oper.create = sfs_create;
 	sfs_oper.open = sfs_open;
 	sfs_oper.release = sfs_release;
-	sfs_oper.flush = sfs_flush;
 	sfs_oper.fsync = sfs_fsync;
 	sfs_oper.read = sfs_read;
 	sfs_oper.write_buf = sfs_write_buf;
