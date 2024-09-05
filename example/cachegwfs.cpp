@@ -398,7 +398,8 @@ struct Redirect {
 		return read_once_older || read_once_grace;
 	}
 	bool test_read_once(const struct stat &st) {
-		if (!read_once_enabled())
+		// No need to scan an empty file (which is often the case with O_CREAT)
+		if (!read_once_enabled() || st.st_size == 0)
 			return false;
 		time_t t = read_once_older ?: time(NULL);
 		return st.st_atime <= st.st_mtime ||
@@ -1119,6 +1120,7 @@ static File *fd_open(int fd, bool redirected, enum op op,
 			if (fs.debug)
 				cerr << "DEBUG: " << op_name(op) << "(" << name << "): "
 					<< " redirect once @" << time(NULL) << ","
+					<< " size=" << st.st_size << ","
 					<< " atime=" << st.st_atime << ","
 					<< " mtime=" << st.st_mtime << ","
 					<< " older=" << r->read_once_older << ","
