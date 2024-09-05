@@ -2494,7 +2494,10 @@ static void sfs_copy_file_range(fuse_req_t req,
 	auto fh_out = get_file(fi_out);
 	auto fd_in = fh_in->get_fd();
 	auto fd_out = fh_out->get_fd();
-	auto redirect = fs.redirect_op(OP_COPY);
+	// If both fds are not redirected, no need to redirect
+	auto redirect = fs.redirect_op(OP_COPY) &&
+		(fd_in == fh_in->get_redirect_fd() ||
+		 fd_out == fh_out->get_redirect_fd());
 
 	// Get redirected fds from File struct
 	if (redirect) {
