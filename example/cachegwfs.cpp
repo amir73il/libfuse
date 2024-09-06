@@ -363,10 +363,10 @@ static const char *op_name(enum op op) {
 struct Redirect {
 	time_t read_once_older {0};
 	time_t read_once_grace {0};
-	std::string read_xattr;
-	std::string write_xattr;
-	std::string readdir_xattr;
-	std::string writedir_xattr;
+	vector<string> read_xattr;
+	vector<string> write_xattr;
+	vector<string> readdir_xattr;
+	vector<string> writedir_xattr;
 	std::string folder_id_xattr;
 	vector<string> xattr_prefixes;
 	std::unordered_set<enum op> ops; // fs operations to redirect
@@ -638,18 +638,20 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op,
 		return true;
 
 	// redirect read/write file/dir if it has stub xattr
-	const string &redirect_xattr = rw ?
+	const auto &redirect_xattr = rw ?
 		(is_dir ? r->writedir_xattr : r->write_xattr) :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
-	if (redirect_xattr.empty())
-		return false;
 
-	ssize_t res;
-	if (procname)
-		res = getxattr(procname, redirect_xattr.c_str(), NULL, 0);
-	else
-		res = fgetxattr(fd, redirect_xattr.c_str(), NULL, 0);
-	return res > 0;
+	for (const auto& xattr : redirect_xattr) {
+		ssize_t res;
+		if (procname)
+			res = getxattr(procname, xattr.c_str(), NULL, 0);
+		else
+			res = fgetxattr(fd, xattr.c_str(), NULL, 0);
+		if (res > 0)
+			return true;
+	}
+	return false;
 }
 
 // Convert <dirfd+name> for system calls that take an O_PATH fd.
@@ -2750,15 +2752,13 @@ static Redirect *read_config_file()
 		} else if (name == "entry_timeout") {
 			fs.entry_timeout = std::stoi(value);
 		} else if (name == "redirect_read_xattr") {
-			// Implies also redirect_readdir_xattr
-			redirect->read_xattr = value;
-			redirect->readdir_xattr = value;
+			redirect->read_xattr.push_back(value);
 		} else if (name == "redirect_readdir_xattr") {
-			redirect->readdir_xattr = value;
+			redirect->readdir_xattr.push_back(value);
 		} else if (name == "redirect_write_xattr") {
-			redirect->write_xattr = value;
+			redirect->write_xattr.push_back(value);
 		} else if (name == "redirect_writedir_xattr") {
-			redirect->writedir_xattr = value;
+			redirect->writedir_xattr.push_back(value);
 		} else if (name == "redirect_folder_id_xattr") {
 			redirect->folder_id_xattr = value;
 		} else if (name == "redirect_write_folder_id") {
