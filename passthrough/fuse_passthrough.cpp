@@ -1211,6 +1211,10 @@ static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 
 	d->offset = 0;
 
+	// Passthrough readdir unless module clears the flag and
+	// implements the readdir operation.
+	fi->passthrough_readdir = 1;
+
 	fi->fh = reinterpret_cast<uint64_t>(d);
 	return 0;
 }
@@ -1365,7 +1369,10 @@ static void pfs_readdir_common(fuse_req_t req, fuse_ino_t ino, size_t size,
 	buf.buf[0].fd = inode.fd;
 
 	fuse_path_at at(req, inode, "");
-	auto res = call_op(readdir)(at, buf.buf, fill_dir, offset, fi, flags);
+	// Passthrough readdir if flag was set on opendir() or if module
+	// does not implements the readdir operation.
+	auto res = (fi->passthrough_readdir ? do_readdir : fs.oper.readdir)
+		   (at, buf.buf, fill_dir, offset, fi, flags);
 	// If there's an error, we can only signal it if we haven't stored
 	// any entries yet - otherwise we'd end up with wrong lookup
 	// counts for the entries that are already in the buffer. So we
@@ -1481,6 +1488,11 @@ static int do_open(const fuse_path_at &in, fuse_file_info *fi)
 		errno = ENOMEM;
 		return -1;
 	}
+
+	// Passthrough read/write unless module clears the flags and
+	// implements the {read,write}_buf operations.
+	fi->passthrough_read = 1;
+	fi->passthrough_write = 1;
 
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	return 0;
@@ -1602,7 +1614,10 @@ static void pfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 	fuse_path_at at(req, inode, "");
 	fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 	auto pbuf = &buf;
-	auto res = call_op(read_buf)(at, &pbuf, size, off, fi);
+	// Passthrough read if flag was set on open() or if module
+	// does not implements the read_buf operation.
+	auto res = (fi->passthrough_read ? do_read_buf : fs.oper.read_buf)
+		   (at, &pbuf, size, off, fi);
 	if (res == -1)
 		fuse_reply_err(req, errno);
 	else
@@ -1629,7 +1644,10 @@ static void pfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 	fuse_path_at at(req, inode, "");
 	auto size {fuse_buf_size(in_buf)};
 	fuse_bufvec out_buf = FUSE_BUFVEC_INIT(size);
-	auto res = call_op(write_buf)(at, &out_buf, off, fi);
+	// Passthrough write if flag was set on open() or if module
+	// does not implements the write_buf operation.
+	auto res = (fi->passthrough_write ? do_write_buf : fs.oper.write_buf)
+		   (at, &out_buf, off, fi);
 	if (res == -1)
 		fuse_reply_err(req, errno);
 	res = fuse_buf_copy(&out_buf, in_buf, FUSE_BUF_COPY_FLAGS);
@@ -2031,13 +2049,16 @@ static void assign_operations(fuse_passthrough_operations &oper,
 	oper.copy_file_range = in.copy_file_range ?: def.copy_file_range;
 }
 
-static void assign_module_operations(fuse_passthrough_module &module)
+static void assign_module_operations(fuse_passthrough_module &module,
+				     fuse_passthrough_module &head)
 {
-	// Initialize module next operations to default fs operations
-	assign_default_operations(module.next);
-	// Initialize fs next operations to either operations of
-	// the new module or to the default fs operations
-	assign_operations(fs.next, module.oper, fs.oper);
+	// Initialize module next operations to either the operations of the
+	// head module or the head module's next operations
+	assign_operations(module.next, head.oper, head.next);
+	// Initialize fs next operations to either operations of the new
+	// module or leave the current fs next operations
+	assign_operations(fs.next, module.oper, fs.next);
+	module.idx = head.idx + 1;
 }
 
 static void maximize_fd_limit()
@@ -2056,7 +2077,8 @@ static void maximize_fd_limit()
 
 
 int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
-			  fuse_passthrough_module *module, size_t oper_size)
+			  fuse_passthrough_module *modules[], int num_modules,
+			  size_t oper_size)
 {
 	// We may need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
@@ -2109,11 +2131,14 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 
 	// Assign default operations to default fs
 	assign_default_operations(fs.oper);
-	// Chain module operations before default fs operations
-	if (module)
-		assign_module_operations(*module);
-	else
-		assign_default_operations(fs.next);
+	assign_default_operations(fs.next);
+	// Chain module operations terminating with default fs operations
+	fuse_passthrough_module *head = &fs;
+	while (num_modules-- > 0) {
+		assign_module_operations(**modules, *head);
+		head = *modules;
+		modules++;
+	}
 
 	fuse_lowlevel_ops pfs_oper {};
 	assign_lowlevel_ops(pfs_oper);
