@@ -36,6 +36,11 @@ struct fuse_passthrough_opts {
 
 struct fuse_inode {
 	virtual int get_fd() const = 0;
+	virtual bool is_dir() const = 0;
+	virtual bool is_regular() const = 0;
+	virtual bool is_symlink() const = 0;
+	virtual bool is_special() const = 0;
+
 	virtual ~fuse_inode() {};
 };
 

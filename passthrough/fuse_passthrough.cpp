@@ -171,8 +171,17 @@ struct fd_guard {
 	}
 };
 
+enum {
+	ftype_unknown,
+	ftype_dir,
+	ftype_regular,
+	ftype_symlink,
+	ftype_special,
+};
+
 struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
+	int _ftype {ftype_unknown};
 	int backing_id {0};
 	ino_t src_ino {0};
 	uint32_t gen {0};
@@ -193,6 +202,17 @@ struct Inode {
 		// Upgrade short lived fd to long lived fd in inode cache
 		_fd = newfd._fd;
 		newfd._fd = -1;
+	}
+
+	void set_ftype(mode_t mode) {
+		if (S_ISDIR(mode))
+			_ftype = ftype_dir;
+		else if (S_ISREG(mode))
+			_ftype = ftype_regular;
+		else if (S_ISLNK(mode))
+			_ftype = ftype_symlink;
+		else
+			_ftype = ftype_special;
 	}
 
 	~Inode() {
@@ -369,6 +389,18 @@ struct InodeRef : fuse_inode {
 	InodePtr i;
 
 	int get_fd() const override { return fd; }
+	bool is_dir() const override {
+		return i->_ftype == ftype_dir;
+	}
+	bool is_regular() const override {
+		return i->_ftype == ftype_regular;
+	}
+	bool is_symlink() const override {
+		return i->_ftype == ftype_symlink;
+	}
+	bool is_special() const override {
+		return i->_ftype == ftype_special;
+	}
 
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
@@ -769,6 +801,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		   but this is of no consequence because at this point no other
 		   thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
+		inode.set_ftype(e->attr.st_mode);
 		inode.src_ino = src_ino;
 		inode.gen = xfs_fh.gen;
 		inode.nlookup = 1;
@@ -2210,6 +2243,7 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 	if (!S_ISDIR(stat.st_mode))
 		errx(1, "ERROR: source is not a directory");
 	fs.src_dev = stat.st_dev;
+	fs.root->_ftype = ftype_dir;
 	fs.root->src_ino = stat.st_ino;
 
 	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
