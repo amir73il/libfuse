@@ -193,8 +193,8 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
         umount(mount_process, mnt_dir)
 
 @pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module', 'cachegwfs'))
-@pytest.mark.parametrize("cache", (False, True))
-def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
+@pytest.mark.parametrize("redirect", ('all', 'open_rw', ''))
+def test_passthrough_hp(short_tmpdir, redirect, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
 
@@ -204,21 +204,26 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
 
     cmdline.append('--foreground')
 
-    redirect = False
-    if not cache:
-        if name == "passthrough_module":
-            # Piggyback installing module debug ops on nocache run
-            cmdline.append('--debug')
+    cache = True
+    if redirect:
         if name == 'cachegwfs':
-            # Piggyback installing cgwfs redirect ops on nocache run
-            cmdline.append('--debug')
-            cmdline.append('--redirect')
+            config_file = 'cachegwfs.config'
+            with open(config_file, 'w') as fh:
+                fh.write('redirect_op=' + redirect + '\n')
             # Redirect dirfd relative paths to full src_dir paths
             cmdline.append('--redirect_path=' + src_dir)
+            cmdline.append('--config_file=' + config_file)
+            cmdline.append('--debug')
             redirect = True
             cache = True
+        elif redirect == "open_rw":
+            # Piggyback wbcache run on redirect=open_rw
+            cmdline.append('--wbcache')
         else:
+            # Piggyback nocache run and debug prints on redirect=all
+            cmdline.append('--debug')
             cmdline.append('--nocache')
+            cache = False
 
     mount_process = subprocess.Popen(cmdline, stdout=output_checker.fd,
                                      stderr=output_checker.fd)
