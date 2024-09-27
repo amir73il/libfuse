@@ -81,6 +81,7 @@ enum op {
 	OP_MKNOD,
 	OP_GETXATTR,
 	OP_SETXATTR,
+	OP_ALL,
 };
 
 const map<enum op, const char *> op_names = {
@@ -103,6 +104,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_UNLINK, "unlink" },
 	{ OP_GETXATTR, "getxattr" },
 	{ OP_SETXATTR, "setxattr" },
+	{ OP_ALL, "all" },
 };
 static const char *op_name(enum op op) {
 	auto iter = op_names.find(op);
@@ -167,9 +169,8 @@ struct CgwFs : public fuse_passthrough_module {
 	}
 	bool redirect_op(enum op op) {
 		auto r = redirect();
-		return redirect_all || op == OP_REDIRECT || r->test_op(op);
+		return op == OP_REDIRECT || r->test_op(OP_ALL) || r->test_op(op);
 	}
-	bool redirect_all{false};
 
 private:
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
@@ -184,7 +185,7 @@ static CgwFs cgwfs{};
 // See: https://github.com/github/libprojfs/blob/master/docs/design.md#extended-attributes
 static bool should_redirect_fd(int fd, const char *procname, enum op op)
 {
-	if (cgwfs.redirect_all)
+	if (cgwfs.redirect_op(OP_ALL))
 		return true;
 
 	if (!cgwfs.redirect_op(op))
@@ -567,10 +568,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		exit(2);
 	}
 
-	cgwfs.opts.debug = options.count("debug");
 	cgwfs.opts.foreground = options.count("foreground");
 	cgwfs.opts.singlethread = options.count("single");
-	cgwfs.redirect_all = options.count("redirect");
 	cgwfs.opts.nosplice = options.count("nosplice");
 	cgwfs.opts.nocache = options.count("nocache");
 	cgwfs.opts.timeout = cgwfs.opts.nocache ? 0 : 1.0;
@@ -643,7 +642,9 @@ static Redirect *read_config_file()
 
 	ifstream cFile(cgwfs.config_file);
 	if (!cFile.is_open()) {
-		cerr << "ERROR: Open config file failed." << endl;
+		if (cgwfs.config_file != CONFIG_FILE)
+			cerr << "ERROR: Failed to open config file "
+				<< cgwfs.config_file << endl;
 		return nullptr;
 	}
 
@@ -721,9 +722,14 @@ int main(int argc, char *argv[])
 	auto options {parse_options(argc, argv)};
 
 	// Read defaults from config file
-	(void)cgwfs.redirect();
+	auto r = cgwfs.redirect();
 	// Re-load config file on SIGHUP
 	set_signal_handler();
+	// These mount option settings are cleared on config file reload
+	if (options.count("redirect"))
+		r->set_op(OP_ALL);
+	if (options.count("debug"))
+		cgwfs.opts.debug = true;
 
 	// We need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
