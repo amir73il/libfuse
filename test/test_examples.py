@@ -193,7 +193,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
         umount(mount_process, mnt_dir)
 
 @pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module', 'cachegwfs'))
-@pytest.mark.parametrize("redirect", ('all', 'open_rw', ''))
+@pytest.mark.parametrize("redirect", ('all', 'open_rw', 'open_ro', ''))
 def test_passthrough_hp(short_tmpdir, redirect, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
@@ -219,11 +219,13 @@ def test_passthrough_hp(short_tmpdir, redirect, name, output_checker):
         elif redirect == "open_rw":
             # Piggyback wbcache run on redirect=open_rw
             cmdline.append('--wbcache')
-        else:
-            # Piggyback nocache run and debug prints on redirect=all
-            cmdline.append('--debug')
+        elif redirect == "open_ro":
+            # Piggyback nocache run on redirect=open_ro
             cmdline.append('--nocache')
             cache = False
+        else:
+            # Piggyback debug prints on redirect=all
+            cmdline.append('--debug')
 
     mount_process = subprocess.Popen(cmdline, stdout=output_checker.fd,
                                      stderr=output_checker.fd)
