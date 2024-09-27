@@ -213,6 +213,8 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
             # Piggyback installing cgwfs redirect ops on nocache run
             cmdline.append('--debug')
             cmdline.append('--redirect')
+            # Redirect dirfd relative paths to full src_dir paths
+            cmdline.append('--redirect_path=' + src_dir)
             redirect = True
             cache = True
         else:
