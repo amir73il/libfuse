@@ -192,7 +192,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module'))
+@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_module', 'cachegwfs'))
 @pytest.mark.parametrize("cache", (False, True))
 def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
@@ -204,11 +204,19 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
 
     cmdline.append('--foreground')
 
+    redirect = False
     if not cache:
-        cmdline.append('--nocache')
         if name == "passthrough_module":
             # Piggyback installing module debug ops on nocache run
             cmdline.append('--debug')
+        if name == 'cachegwfs':
+            # Piggyback installing cgwfs redirect ops on nocache run
+            cmdline.append('--debug')
+            cmdline.append('--redirect')
+            redirect = True
+            cache = True
+        else:
+            cmdline.append('--nocache')
 
     mount_process = subprocess.Popen(cmdline, stdout=output_checker.fd,
                                      stderr=output_checker.fd)
@@ -244,12 +252,13 @@ def test_passthrough_hp(short_tmpdir, cache, name, output_checker):
         tst_link(mnt_dir)
         tst_truncate_path(mnt_dir)
         tst_truncate_fd(mnt_dir)
-        tst_open_unlink(mnt_dir)
+        if not redirect:
+            tst_open_unlink(mnt_dir)
 
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we
         # can't use it.
-        if not cache:
+        if not cache and not redirect:
             syscall_test_cmd = [ os.path.join(basename, 'test', 'test_syscalls'),
                              mnt_dir, ':' + src_dir ]
             # unlinked testfiles check fails without kernel fix
