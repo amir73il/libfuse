@@ -327,8 +327,10 @@ int main(int argc, char *argv[]) {
 	assign_operations(module.oper);
 	// If we are not printing any traces, let the passthrough library take care
 	// of everything
-	auto mod = (module.opts.debug ? &module : NULL);
+	int num_modules = module.opts.debug;
+	fuse_passthrough_module *modules[] = { &module };
 
-	return fuse_passthrough_main(&args, module.opts, mod, sizeof(module.oper));
+	return fuse_passthrough_main(&args, module.opts, modules, num_modules,
+				     sizeof(module.oper));
 }
 
