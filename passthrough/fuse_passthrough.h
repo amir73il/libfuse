@@ -31,6 +31,7 @@ struct fuse_passthrough_opts {
 	bool clone_fd{true};
 	bool debug{false};
 	unsigned int max_idle_threads{10};
+	bool kernel_passthrough{false};
 };
 
 struct fuse_inode {
