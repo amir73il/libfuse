@@ -42,6 +42,15 @@ typedef std::shared_ptr<void> fuse_inode_state_t;
 typedef bool (*fuse_fill_state_t)(const fuse_inode &inode,
 				  fuse_inode_state_t &state, void *data);
 
+struct fh_encoder {
+	virtual int ino_size() const = 0;
+	virtual ino_t ino(struct file_handle &fh) const = 0;
+	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t nodeid(struct file_handle &fh) const = 0;
+	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
+	virtual ~fh_encoder() {}
+};
+
 struct fuse_inode {
 	virtual int get_fd() const = 0;
 	virtual ino_t ino() const = 0;
