@@ -202,6 +202,8 @@ void __trace_fd_path_at(const fuse_path_at &in, const char *caller);
  */
 struct fuse_file {
 	virtual int get_fd() = 0;
+	virtual fuse_state_t& get_state(const fuse_passthrough_module &module) = 0;
+
 	virtual ~fuse_file() {}
 };
 
@@ -213,6 +215,12 @@ static inline fuse_file *get_file(fuse_file_info *fi)
 static inline int get_file_fd(fuse_file_info *fi)
 {
 	return get_file(fi)->get_fd();
+}
+
+static inline fuse_state_t& get_file_state(fuse_file_info *fi,
+					   const fuse_passthrough_module &module)
+{
+	return get_file(fi)->get_state(module);
 }
 
 static inline void release_file(fuse_file_info *fi)
