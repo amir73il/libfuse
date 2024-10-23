@@ -551,12 +551,15 @@ struct File : public fuse_file {
 	int _fd {-1};
 
 	int get_fd() override { return _fd; };
+	bool get_state(const fuse_passthrough_module &module, fuse_state_t &state) {
+		return module_states.get_state(module, state);
+	}
 
 	File() = delete;
 	File(const File&) = delete;
 	File& operator=(const File&) = delete;
 
-	File(int fd) : _fd(fd) {
+	File(int fd, int num_modules) : _fd(fd) ,module_states(num_modules) {
 		if (fs.debug())
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
 	}
@@ -566,6 +569,10 @@ struct File : public fuse_file {
 		if (_fd > 0)
 			close(_fd);
 	}
+
+private:
+	// Allow each module to store/fetch state in file
+	fuse_module_states module_states;
 };
 
 static void fuse_reply_fd_err(fuse_req_t req, int err)
@@ -1326,8 +1333,11 @@ struct Dir : public fuse_file {
 	off_t offset;
 
 	int get_fd() override { return dirfd(dp); };
+	bool get_state(const fuse_passthrough_module &module, fuse_state_t &state) {
+		return module_states.get_state(module, state);
+	}
 
-	Dir() = default;
+	Dir(int num_modules) : module_states(num_modules) {}
 	Dir(const Dir&) = delete;
 	Dir& operator=(const Dir&) = delete;
 
@@ -1335,6 +1345,10 @@ struct Dir : public fuse_file {
 		if(dp)
 			closedir(dp);
 	}
+
+private:
+	// Allow each module to store/fetch state in file
+	fuse_module_states module_states;
 };
 
 
@@ -1349,7 +1363,7 @@ static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto d = new (nothrow) Dir;
+	auto d = new (nothrow) Dir(fs.num_modules);
 	if (d == nullptr) {
 		close(fd);
 		errno = ENOMEM;
@@ -1636,7 +1650,7 @@ static int do_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = new (nothrow) File(fd, fs.num_modules);
 	if (!fh) {
 		close(fd);
 		errno = ENOMEM;
@@ -1685,7 +1699,7 @@ static int do_open(const fuse_path_at &in, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = new (nothrow) File(fd, fs.num_modules);
 	if (!fh) {
 		close(fd);
 		errno = ENOMEM;
