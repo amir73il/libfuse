@@ -390,8 +390,34 @@ bool set_module_inode_state(const fuse_passthrough_module &m,
 	return inode.set_state(m, new_state);
 }
 
+bool get_module_file_state(const fuse_passthrough_module &m,
+			   fuse_file_info *fi, fuse_state_t &ret_state)
+{
+	auto ret = get_file(fi)->get_state(m);
+	if (!ret)
+		return false;
 
-struct File : public fuse_file {
+	ret_state = ret.value();
+	return true;
+}
+
+bool set_module_file_state(const fuse_passthrough_module &m,
+			   fuse_file_info *fi, const fuse_state_t &new_state)
+{
+	return get_file(fi)->set_state(m, new_state);
+}
+
+
+struct file_states : public fuse_file {
+	file_states(int num_modules) :
+		fuse_file(module_states), module_states(num_modules) {}
+	virtual ~file_states() {}
+
+	// Allow each module to store/fetch state in file
+	fuse_module_states module_states;
+};
+
+struct File : public file_states {
 	int _fd {-1};
 
 	int get_fd() override { return _fd; };
@@ -400,7 +426,7 @@ struct File : public fuse_file {
 	File(const File&) = delete;
 	File& operator=(const File&) = delete;
 
-	File(int fd) : _fd(fd) {
+	File(int fd, int num_modules) : file_states(num_modules), _fd(fd) {
 		if (fs.debug())
 			cerr << "DEBUG: open(): fd=" << _fd << endl;
 	}
@@ -1099,13 +1125,13 @@ static void pfs_readlink(fuse_req_t req, fuse_ino_t ino)
 }
 
 
-struct Dir : public fuse_file {
+struct Dir : public file_states {
 	DIR *dp {nullptr};
 	off_t offset;
 
 	int get_fd() override { return dirfd(dp); };
 
-	Dir() = default;
+	Dir(int num_modules) : file_states(num_modules) {}
 	Dir(const Dir&) = delete;
 	Dir& operator=(const Dir&) = delete;
 
@@ -1128,7 +1154,7 @@ static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto d = new (nothrow) Dir;
+	auto d = new (nothrow) Dir(fs.num_modules);
 	if (d == nullptr) {
 		close(fd);
 		errno = ENOMEM;
@@ -1372,7 +1398,7 @@ static int do_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = new (nothrow) File(fd, fs.num_modules);
 	if (!fh) {
 		close(fd);
 		errno = ENOMEM;
@@ -1428,7 +1454,7 @@ static int do_open(const fuse_path_at &in, fuse_file_info *fi)
 	if (fd == -1)
 		return -1;
 
-	auto fh = new (nothrow) File(fd);
+	auto fh = new (nothrow) File(fd, fs.num_modules);
 	if (!fh) {
 		close(fd);
 		errno = ENOMEM;

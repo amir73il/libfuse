@@ -78,7 +78,7 @@ struct fuse_inode : fuse_states {
 };
 
 /*
- * Store/fetch a generic state object per module per inode.
+ * Store/fetch a generic state object per module per inode/file.
  *
  * If the module storing a pointer to an allocated state object, then the
  * module must implement the forget() method to free the state object.
@@ -95,6 +95,10 @@ bool get_module_inode_state(const fuse_passthrough_module &m,
 			    void *data = NULL);
 bool set_module_inode_state(const fuse_passthrough_module &m,
 			    fuse_ino_t ino, const fuse_state_t &new_state);
+bool get_module_file_state(const fuse_passthrough_module &m,
+			   fuse_file_info *fi, fuse_state_t &ret_state);
+bool set_module_file_state(const fuse_passthrough_module &m,
+			   fuse_file_info *fi, const fuse_state_t &new_state);
 
 struct fuse_path_at {
 	/*
@@ -214,7 +218,8 @@ void __trace_fd_path_at(const fuse_path_at &in, const char *caller);
 /*
  * Abstract fi->fh object for an open FUSE passthrough file or directory
  */
-struct fuse_file {
+struct fuse_file : fuse_states {
+	fuse_file(fuse_module_states &s) : fuse_states(s) {}
 	virtual int get_fd() = 0;
 	virtual ~fuse_file() {}
 
@@ -322,6 +327,10 @@ struct fuse_passthrough_operations {
 				    struct fuse_file_info *, off_t,
 				    size_t, int);
 	int (*flush) (const fuse_path_at &, struct fuse_file_info *);
+	/*
+	 * release() operation should be implemented by modules to destruct
+	 * file state objects. It is called before freeing the file object.
+	 */
 	int (*release) (const fuse_path_at &, struct fuse_file_info *);
 	int (*fsync) (const fuse_path_at &, int, struct fuse_file_info *);
 	int (*flock) (const fuse_path_at &, struct fuse_file_info *, int);
