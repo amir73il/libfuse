@@ -23,6 +23,7 @@
 
 static const char *basepath;
 static const char *basepath_r;
+static int realdir_fd = -1;
 static char testfile[1024];
 static char testfile2[1024];
 static char testdir[1024];
@@ -484,6 +485,11 @@ static int create_file(const char *path, const char *data, int len)
 			return -1;
 		}
 	}
+	res = fsync(fd);
+	if (res == -1) {
+		PERROR("fsync");
+		return -1;
+	}
 	res = close(fd);
 	if (res == -1) {
 		PERROR("close");
@@ -527,6 +533,28 @@ static int create_path_fd(const char *path, const char *data, int len)
 	return path_fd;
 }
 
+static void realdir_drop_caches(void)
+{
+	int fd;
+
+	if (!unlinked_test || realdir_fd < 0)
+		return;
+
+	if (syncfs(realdir_fd)) {
+		PERROR("syncfs");
+		return;
+	}
+
+	fd = open("/proc/sys/vm/drop_caches", O_WRONLY);
+	if (fd < 0) {
+		PERROR("drop_caches");
+		return;
+	}
+
+	write(fd, "3", 1);
+	close(fd);
+}
+
 // Can be called once per test
 static int create_testfile(const char *path, const char *data, int len)
 {
@@ -542,6 +570,11 @@ static int create_testfile(const char *path, const char *data, int len)
 	fd = create_path_fd(path, data, len);
 	if (fd == -1)
 		return -1;
+
+	// O_PATH fd holds fuse inode in cache but not the real inode
+	// Drop realdir inode cache to test that server holds it or can
+	// open it by file handle.
+	realdir_drop_caches();
 
 	t->fd = fd;
 
@@ -1975,6 +2008,12 @@ int main(int argc, char *argv[])
 		char *arg = argv[a];
 		if (arg[0] == ':') {
 			basepath_r = arg + 1;
+			realdir_fd = open(basepath_r, O_DIRECTORY);
+			if (realdir_fd < 0) {
+				fprintf(stderr, "failed to open realdir '%s': %s\n",
+					basepath_r, strerror(errno));
+				return 1;
+			}
 		} else {
 			if (arg[0] == '-') {
 				arg++;
