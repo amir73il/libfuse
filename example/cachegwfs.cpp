@@ -306,6 +306,15 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 	}
 }
 
+static uint64_t get_folder_id(const fuse_path_at &at)
+{
+	auto ret = at.inode().get_state(fs);
+	if (!ret)
+		return 0;
+
+	return static_cast<uint64_t>(ret.value());
+}
+
 static enum op redirect_open_op(fuse_file_info *fi)
 {
 	enum op op;
@@ -461,7 +470,33 @@ static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	}
 	// Lookup itself is never in the redirected path, because we
 	// need to find the real xfs inode
-	return next_op(lookup)(at, e);
+	auto ret = next_op(lookup)(at, e);
+	if (ret)
+		return ret;
+
+	// If subdir name is not a decimal number, the folder id is undefined.
+	// For all other inodes, it is inheritted from the parent.
+	uint64_t folder_id = 0;
+	if (at.inode().is_root() && S_ISDIR(e->attr.st_mode)) {
+		folder_id = strtoull(at.path(), NULL, 10);
+		if (fs.debug() && folder_id)
+			cerr << "DEBUG: first level subdir folder id "
+				<< folder_id << endl;
+	} else {
+		folder_id = get_folder_id(at);
+		if (folder_id && fs.debug())
+			cerr << "DEBUG: inherit parent folder id "
+				<< folder_id << endl;
+	}
+
+	if (folder_id && !set_module_inode_state(fs, e->ino, folder_id)) {
+		if (fs.debug())
+			cerr << "ERROR: failed setting folder id "
+				<< folder_id
+				<< " ino=" << e->ino << endl;
+	}
+
+	return 0;
 }
 
 static int cgwfs_getattr(const fuse_path_at &in, struct stat *attr,
