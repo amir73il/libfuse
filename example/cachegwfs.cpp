@@ -289,6 +289,67 @@ static enum op redirect_open_op(fuse_file_info *fi)
 	return op;
 }
 
+struct File {
+	int get_fd() const { return _fd; };
+
+	File() = delete;
+	File(const File&) = delete;
+	File& operator=(const File&) = delete;
+
+	File(int fd) : _fd(fd) {
+		if (fs.debug())
+			cerr << "DEBUG: open(): redirect_fd=" << _fd << endl;
+	}
+	~File() {
+		if (fs.debug())
+			cerr << "DEBUG: close(): redirect_fd=" << _fd << endl;
+		if (_fd > 0)
+			close(_fd);
+	}
+
+private:
+	int _fd {-1};
+};
+
+static int get_file_redirect_fd(fuse_file_info *fi)
+{
+	fuse_state_t& state = get_file_state(fi, fs);
+
+	if (!state)
+		return -1;
+
+	return reinterpret_cast<File *>(state.get())->get_fd();
+}
+
+static bool set_file_redirect_fd(fuse_file_info *fi, int rfd)
+{
+	fuse_state_t& state = get_file_state(fi, fs);
+
+	if (state)
+		return false;
+
+	auto p = new (nothrow) File(rfd);
+	if (!p) {
+		if (fs.debug())
+			cerr << "ERROR: Allocate file state failed."
+				<< endl;
+		return false;
+	}
+
+	state.reset(p);
+	return true;
+}
+
+static int open_redirect_fd(const fuse_path_at &in, int flags)
+{
+	auto out = get_fd_path_op(in, OP_REDIRECT);
+
+	if (!out.follow())
+		flags &= ~O_NOFOLLOW;
+
+	return open(out.path(), flags);
+}
+
 static int check_safe_fd(fuse_file_info *fi, enum op op)
 {
 	auto fd = get_file_fd(fi);
@@ -544,36 +605,29 @@ static ssize_t cgwfs_copy_file_range(const fuse_path_at &at_in,
 	auto fd_out = get_file_fd(fi_out);
 	auto redirect = fs.redirect_op(OP_COPY);
 
-	// We could check if fd_in or fd_out are already redirected
-	// and we could store the redirected fd in File struct, but
-	// for now we always open temp fds to redirect copy
+	// Check if fd_in or fd_out are already redirected
+	// and store the redirected fds in File struct
 	if (redirect) {
-		auto redirect_in = get_fd_path_op(at_in, OP_COPY);
-		auto redirect_out = get_fd_path_op(at_out, OP_COPY);
+		fd_in = get_file_redirect_fd(fi_in);
+		if (fd_in == -1) {
+			fd_in = open_redirect_fd(at_in, O_RDONLY);
+			if (fd_in == -1)
+				return -1;
+			set_file_redirect_fd(fi_in, fd_in);
+		}
 
-		fd_in = open(redirect_in.path(), O_RDONLY | O_NOFOLLOW);
-		if (fd_in == -1)
-			return -1;
-
-		fd_out = open(redirect_out.path(), O_RDWR | O_NOFOLLOW);
+		fd_out = get_file_redirect_fd(fi_out);
 		if (fd_out == -1) {
-			auto saverr = errno;
-			close(fd_in);
-			errno = saverr;
-			return -1;
+			fd_out = open_redirect_fd(at_out, O_RDONLY);
+			if (fd_out == -1)
+				return -1;
+			set_file_redirect_fd(fi_out, fd_out);
 		}
 	}
 
 	// To simplify, always terminate the copy_file_range() operation
 	// chain without calling next module
 	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
-
-	if (redirect) {
-		auto saverr = errno;
-		close(fd_in);
-		close(fd_out);
-		errno = saverr;
-	}
 
 	return res;
 }
