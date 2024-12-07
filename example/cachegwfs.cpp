@@ -289,6 +289,63 @@ static enum op redirect_open_op(fuse_file_info *fi)
 	return op;
 }
 
+static int get_file_redirect_fd(fuse_file_info *fi)
+{
+	fuse_state_t state;
+	if (!get_module_file_state(fs, fi, state))
+		return -1;
+
+	if (state > static_cast<uint64_t>(numeric_limits<int>::max()) &&
+	    state < static_cast<uint64_t>(numeric_limits<int>::min()))
+		return -1;
+
+	auto rfd = static_cast<int>(state);
+	if (rfd >= 0 && fs.debug()) {
+		cerr << "DEBUG: get redirect_fd=" << rfd
+			<< ", fd=" << get_file_fd(fi) << endl;
+	}
+	return rfd;
+}
+
+static bool set_file_redirect_fd(fuse_file_info *fi, int rfd)
+{
+	fuse_state_t state = static_cast<fuse_state_t>(rfd);
+
+	if (rfd >= 0 && fs.debug()) {
+		cerr << "DEBUG: set redirect_fd=" << rfd
+			<< ", fd=" << get_file_fd(fi) << endl;
+	}
+	return set_module_file_state(fs, fi, state);
+}
+
+static int open_redirect_fd(const fuse_path_at &in, fuse_file_info *fi, int flags)
+{
+	auto out = get_fd_path_op(in, OP_REDIRECT);
+
+	if (!out.follow())
+		flags &= ~O_NOFOLLOW;
+
+	auto rfd = open(out.path(), flags);
+	if (rfd >= 0 && fs.debug()) {
+		cerr << "DEBUG: open redirect_fd=" << rfd
+			<< ", fd=" << get_file_fd(fi) << endl;
+	}
+	return rfd;
+}
+
+static void close_file_redirect_fd(fuse_file_info *fi)
+{
+	auto rfd = get_file_redirect_fd(fi);
+
+	if (rfd >= 0) {
+		if (fs.debug()) {
+			cerr << "DEBUG: close redirect_fd=" << rfd
+				<< ", fd=" << get_file_fd(fi) << endl;
+		}
+		close(rfd);
+	}
+}
+
 static int check_safe_fd(fuse_file_info *fi, enum op op)
 {
 	auto fd = get_file_fd(fi);
@@ -319,6 +376,8 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 		return -1;
 	}
 
+	// initialize redirect fd state
+	set_file_redirect_fd(fi, -1);
 	return 0;
 }
 
@@ -463,6 +522,12 @@ static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 	return finish_open(out, fi, op);
 }
 
+static int cgwfs_release(const fuse_path_at &, fuse_file_info *fi)
+{
+	close_file_redirect_fd(fi);
+	return 0;
+}
+
 static int cgwfs_statfs(const fuse_path_at &in, struct statvfs *stbuf)
 {
 	auto out = get_fd_path_op(in, OP_STATFS);
@@ -544,36 +609,29 @@ static ssize_t cgwfs_copy_file_range(const fuse_path_at &at_in,
 	auto fd_out = get_file_fd(fi_out);
 	auto redirect = fs.redirect_op(OP_COPY);
 
-	// We could check if fd_in or fd_out are already redirected
-	// and we could store the redirected fd in File struct, but
-	// for now we always open temp fds to redirect copy
+	// Check if fd_in or fd_out are already redirected
+	// and store/fetch the redirected fds in file state
 	if (redirect) {
-		auto redirect_in = get_fd_path_op(at_in, OP_COPY);
-		auto redirect_out = get_fd_path_op(at_out, OP_COPY);
+		fd_in = get_file_redirect_fd(fi_in);
+		if (fd_in == -1) {
+			fd_in = open_redirect_fd(at_in, fi_in, O_RDONLY);
+			if (fd_in == -1)
+				return -1;
+			set_file_redirect_fd(fi_in, fd_in);
+		}
 
-		fd_in = open(redirect_in.path(), O_RDONLY | O_NOFOLLOW);
-		if (fd_in == -1)
-			return -1;
-
-		fd_out = open(redirect_out.path(), O_RDWR | O_NOFOLLOW);
+		fd_out = get_file_redirect_fd(fi_out);
 		if (fd_out == -1) {
-			auto saverr = errno;
-			close(fd_in);
-			errno = saverr;
-			return -1;
+			fd_out = open_redirect_fd(at_out, fi_out, O_RDWR);
+			if (fd_out == -1)
+				return -1;
+			set_file_redirect_fd(fi_out, fd_out);
 		}
 	}
 
 	// To simplify, always terminate the copy_file_range() operation
 	// chain without calling next module
 	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
-
-	if (redirect) {
-		auto saverr = errno;
-		close(fd_in);
-		close(fd_out);
-		errno = saverr;
-	}
 
 	return res;
 }
@@ -597,6 +655,7 @@ static void cgwfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.opendir = cgwfs_opendir;
 	oper.create = cgwfs_create;
 	oper.open = cgwfs_open;
+	oper.release = cgwfs_release;
 	oper.statfs = cgwfs_statfs;
 	oper.setxattr = cgwfs_setxattr;
 	oper.getxattr = cgwfs_getxattr;
