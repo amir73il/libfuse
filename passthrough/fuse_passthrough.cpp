@@ -1402,6 +1402,8 @@ static void pfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		return;
 
 	fuse_fd_path_at at(req, inode, fi);
+	if (fs.opts.async_flush && fi->flush)
+		call_op(flush)(at, fi);
 	call_op(release)(at, fi);
 	fuse_reply_err(req, 0);
 }
@@ -1866,7 +1868,8 @@ static void assign_lowlevel_ops(fuse_lowlevel_ops &pfs_oper)
 	pfs_oper.create = pfs_create;
 	pfs_oper.open = pfs_open;
 	pfs_oper.release = pfs_release;
-	pfs_oper.flush = pfs_flush;
+	if (fs.opts.async_flush)
+		pfs_oper.flush = pfs_flush;
 	pfs_oper.fsync = pfs_fsync;
 	pfs_oper.read = pfs_read;
 	pfs_oper.write_buf = pfs_write_buf;
