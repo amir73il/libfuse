@@ -192,7 +192,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs'))
+@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs', 'cachegwfs'))
 @pytest.mark.parametrize("mode", ('', 'debug', 'wbcache', 'nopassthrough', 'nocache'))
 def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
@@ -202,6 +202,20 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     cmdline = base_cmdline + \
               [ pjoin(basename, 'example', name),
                 src_dir, mnt_dir ]
+
+    redirect = None
+    if name == 'cachegwfs':
+        cmdline.append('--readdirpassthrough')
+        keepfd = cache;
+        if mode == 'debug':
+            # Piggyback redirect mode on debug mode
+            redirect = True
+            cmdline.append('--redirect')
+
+        if keepfd:
+            cmdline.append('--keepfd')
+        else:
+            cmdline.append('--nokeepfd')
 
     cmdline.append('--foreground')
 
@@ -241,7 +255,8 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         tst_link(mnt_dir)
         tst_truncate_path(mnt_dir)
         tst_truncate_fd(mnt_dir)
-        tst_open_unlink(mnt_dir)
+        if not redirect:
+            tst_open_unlink(mnt_dir)
 
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we

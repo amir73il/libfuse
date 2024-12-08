@@ -41,6 +41,11 @@ if get_option('passthrough')
                link_with: libfuse_passthrough,
                cpp_args : '-std=c++17',
                install: false)
+    executable('cachegwfs', 'cachegwfs.cpp',
+               dependencies: [ thread_dep, libfuse_dep ],
+               link_with: libfuse_passthrough,
+               cpp_args : '-std=c++17',
+               install: true, install_dir: get_option('bindir'))
 endif
 endif
 
