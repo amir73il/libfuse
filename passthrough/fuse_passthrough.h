@@ -51,6 +51,8 @@ struct fh_encoder {
 	virtual int ino_size() const = 0;
 	virtual ino_t ino(struct file_handle &fh) const = 0;
 	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t parent_ino(struct file_handle &fh) const = 0;
+	virtual uint32_t parent_gen(struct file_handle &fh) const = 0;
 	virtual ino_t nodeid(struct file_handle &fh) const = 0;
 	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
 	virtual ~fh_encoder() {}
