@@ -206,17 +206,32 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     redirect = None
     if name == 'cachegwfs':
         cmdline.append('--readdirpassthrough')
-        keepfd = cache;
+        keepfd = None;
         if mode == 'debug':
-            # Piggyback redirect mode on debug mode
-            redirect = True
-            cmdline.append('--redirect')
+            # Piggyback redirect=all on debug mode
+            redirect = "all"
+        elif mode == 'wbcache':
+            # Piggyback redirect=open_ro on wbcache mode
+            redirect = "open_ro"
+        elif mode == 'nopassthrough':
+            # Piggyback --keepfd and redirect=open_rw on nopassthrough mode
+            redirect = "open_rw"
+            keepfd = True
+        elif mode == 'nocache':
+            # Piggyback --nokeepfd and no redirect on nocache mode
+            keepfd = False
+
+        if redirect:
+            config_file = 'cachegwfs.config'
+            with open(config_file, 'w') as fh:
+                fh.write('redirect_op=' + redirect + '\n')
             # Redirect dirfd relative paths to full src_dir paths
             cmdline.append('--redirect_path=' + src_dir)
+            cmdline.append('--config_file=' + config_file)
 
         if keepfd:
             cmdline.append('--keepfd')
-        else:
+        elif keepfd is False:
             cmdline.append('--nokeepfd')
 
     cmdline.append('--foreground')
