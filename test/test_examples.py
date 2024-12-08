@@ -218,6 +218,9 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         elif mode == 'nopassthrough':
             # Piggyback redirect=open_rw on nopassthrough mode
             redirect = "open_rw"
+        else:
+            # Piggyback redirect=copy on read cache mode
+            redirect = "copy"
     if redirect:
         config_file = 'cachegwfs.config'
         with open(config_file, 'w') as fh:

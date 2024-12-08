@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
@@ -81,6 +82,7 @@ enum op {
 	OP_SYMLINK,
 	OP_GETXATTR,
 	OP_SETXATTR,
+	OP_COPY,
 	// redirect all ops with --redirect cmdline option
 	OP_ALL,
 };
@@ -105,6 +107,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_SYMLINK, "symlink" },
 	{ OP_GETXATTR, "getxattr" },
 	{ OP_SETXATTR, "setxattr" },
+	{ OP_COPY, "copy" },
 	{ OP_ALL, "all" },
 };
 static const char *op_name(enum op op) {
@@ -521,6 +524,60 @@ static int cgwfs_removexattr(const fuse_path_at &in, const char *name)
 	return next_op(removexattr)(out, name);
 }
 
+#ifndef HAVE_COPY_FILE_RANGE
+static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
+			      loff_t *off_out, size_t len, unsigned int flags)
+{
+	return syscall(__NR_copy_file_range, fd_in, off_in, fd_out,
+			off_out, len, flags);
+}
+#endif
+
+static ssize_t cgwfs_copy_file_range(const fuse_path_at &at_in,
+				struct fuse_file_info *fi_in, off_t off_in,
+				const fuse_path_at &at_out,
+				struct fuse_file_info *fi_out, off_t off_out,
+				size_t len, int flags)
+{
+	ssize_t res;
+	auto fd_in = get_file_fd(fi_in);
+	auto fd_out = get_file_fd(fi_out);
+	auto redirect = fs.redirect_op(OP_COPY);
+
+	// We could check if fd_in or fd_out are already redirected
+	// and we could store the redirected fd in File struct, but
+	// for now we always open temp fds to redirect copy
+	if (redirect) {
+		auto redirect_in = get_fd_path_op(at_in, OP_COPY);
+		auto redirect_out = get_fd_path_op(at_out, OP_COPY);
+
+		fd_in = open(redirect_in.path(), O_RDONLY | O_NOFOLLOW);
+		if (fd_in == -1)
+			return -1;
+
+		fd_out = open(redirect_out.path(), O_RDWR | O_NOFOLLOW);
+		if (fd_out == -1) {
+			auto saverr = errno;
+			close(fd_in);
+			errno = saverr;
+			return -1;
+		}
+	}
+
+	// To simplify, always terminate the copy_file_range() operation
+	// chain without calling next module
+	res = copy_file_range(fd_in, &off_in, fd_out, &off_out, len, flags);
+
+	if (redirect) {
+		auto saverr = errno;
+		close(fd_in);
+		close(fd_out);
+		errno = saverr;
+	}
+
+	return res;
+}
+
 
 static void cgwfs_assign_operations(fuse_passthrough_operations &oper)
 {
@@ -545,6 +602,7 @@ static void cgwfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.getxattr = cgwfs_getxattr;
 	oper.listxattr = cgwfs_listxattr;
 	oper.removexattr = cgwfs_removexattr;
+	oper.copy_file_range = cgwfs_copy_file_range;
 }
 
 static void print_usage(cxxopts::Options& parser, char *prog_name) {
