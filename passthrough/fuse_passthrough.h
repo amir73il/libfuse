@@ -41,6 +41,7 @@ struct fuse_passthrough_opts {
 
 struct fuse_passthrough_module;
 struct fuse_inode;
+struct file_handle;
 
 typedef std::shared_ptr<void> fuse_state_t;
 typedef bool (*fuse_fill_state_t)(const fuse_inode &inode,
@@ -49,6 +50,11 @@ typedef bool (*fuse_fill_state_t)(const fuse_inode &inode,
 struct fuse_inode {
 	virtual int get_fd() const = 0;
 	virtual bool get_state(const fuse_passthrough_module &module, fuse_state_t &state) = 0;
+
+	virtual ino_t ino() const = 0;
+	virtual ino_t gen() const = 0;
+	virtual ino_t nodeid() const = 0;
+	virtual file_handle *get_file_handle() const = 0;
 
 	virtual bool is_dir() const = 0;
 	virtual bool is_regular() const = 0;

@@ -94,14 +94,18 @@ struct xfs_fh {
 		struct fid32 fid32;
 	};
 
-	xfs_fh() {
+	xfs_fh(ino_t src_ino) {
 		// Initialize file handle buffer to detect -o inode64/inode32
 		fh.handle_bytes = sizeof(fid);
 		fh.handle_type = 0;
 		fid.ino = fid.gen = 0;
+		// Remember src_ino in case file handles are not supported
+		nodeid = ino = src_ino;
 	}
 
-	xfs_fh(ino_t ino, uint32_t gen, bool ino32)
+	// Reconstruct file handle buffer from <ino;gen>
+	// With ext4, this also works with gen 0 (for any)
+	void encode(bool ino32)
 	{
 		if (ino32)
 			init_fid32(ino, gen);
@@ -131,6 +135,7 @@ struct xfs_fh {
 	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
 	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
 
+	// Extract source <ino;gen> and FUSE ino from source file handle
 	bool decode()
 	{
 		if (is_ino64()) {
@@ -149,7 +154,6 @@ struct xfs_fh {
 		return false;
 	}
 
-	// These values are only valid after calling decode()
 	ino_t nodeid{0};
 	ino_t ino{0};
 	uint32_t gen{0};
@@ -200,14 +204,16 @@ struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	int _ftype {ftype_unknown};
 	int backing_id {0};
-	ino_t src_ino {0};
-	uint32_t gen {0};
+	xfs_fh src_fh {0};
 	uint64_t nlookup {0};
 	// Allow each module to store/fetch state in inode
 	fuse_module_states module_states;
 	mutex m;
 
-	bool dead() { return !src_ino; }
+	ino_t ino() { return src_fh.ino; }
+	ino_t gen() { return src_fh.gen; }
+	ino_t nodeid() { return src_fh.nodeid; }
+	bool dead() { return !src_fh.ino; }
 
 	Inode(int num_modules) : module_states(num_modules) {}
 	// Delete copy constructor and assignments. We could implement
@@ -265,10 +271,14 @@ struct Fs : public fuse_passthrough_module {
 		inodes[0].reset(new Inode(0));
 	}
 
-	int open_by_ino(InodePtr inode);
+	const char *source() { return opts.source.c_str(); }
+	void init_root();
+	int open_by_fh(xfs_fh &fh);
 	uint32_t xfs_bulkstat_gen(__u64 ino);
 
 private:
+	void get_root_fh(ino_t src_ino);
+
 	int _bulkstat_fd{-1};
 };
 static Fs fs{};
@@ -345,10 +355,6 @@ void __trace_fd_path_at(const fuse_path_at &at, const char *caller)
 
 uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 {
-	// Method only works for XFS and requires SYS_CAP_ADMIN
-	if (!fs.bulkstat)
-		return 0;
-
 	__s32 count = 0;
 	struct xfs_bstat bstat = { };
 	struct xfs_fsop_bulkreq breq = {
@@ -370,37 +376,72 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	}
 
 	if (debug()) {
-		cerr << "DEBUG: open_by_ino(): ino=" << ino << ", count=" << count
+		cerr << "DEBUG: xfs_bulkstat_gen(): ino=" << ino << ", count=" << count
 			<< ", bs_ino=" << bstat.bs_ino  << ", bs_gen=" << bstat.bs_gen <<  endl;
 	}
 
 	return bstat.bs_gen;
 }
 
-int Fs::open_by_ino(InodePtr inode)
+int Fs::open_by_fh(xfs_fh &fh)
 {
 	if (!fhandles)
 		return 0;
 
-	auto ino = inode->src_ino;
-	auto gen = inode->gen;
-
-	// We usually use the gen that we stored during lookup
-	// Only in the special case of lookup(ino, ".") (i.e. recover
-	// an NFS file handle after server restart), we need to resort
-	// to bulkstat which may or may not be supported by filesystem
-	if (!gen)
-		gen = xfs_bulkstat_gen(ino);
-
-	// Open by reconstructed file handle
-	// With ext4, this also works with gen 0 (for any)
-	struct xfs_fh fake_fh{ino, gen, fs.ino32};
-
-	int fd = open_by_handle_at(root->_fd, &fake_fh.fh, O_PATH);
+	int fd = open_by_handle_at(root->_fd, &fh.fh, O_PATH);
 	if (fd < 0)
 		return fd;
 
 	return fd;
+}
+
+void Fs::get_root_fh(ino_t src_ino)
+{
+	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
+	root->_fd = open(source(), O_DIRECTORY | O_RDONLY);
+	if (root->_fd == -1)
+		err(1, "ERROR: open(\"%s\")", source());
+
+	int mount_id;
+	struct xfs_fh xfs_fh{src_ino};
+	auto ret = name_to_handle_at(root->_fd, "", &xfs_fh.fh, &mount_id,
+				     AT_EMPTY_PATH);
+	if (ret == -1)
+		err(1, "ERROR: name_to_handle_at(\"%s\")", source());
+
+	if (!xfs_fh.decode() || src_ino != xfs_fh.ino) {
+		// Will keep open O_PATH fd instead of open_by_handle()
+		fhandles = false;
+		warn("WARNING: source filesystem file handle type not supported");
+	} else {
+		root->src_fh = xfs_fh;
+		// Auto detect xfs with -o inode32 (or ext4)
+		ino32 = xfs_fh.is_ino32();
+		// bulkstat support is an indication of xfs
+		bulkstat = xfs_bulkstat_gen(src_ino);
+		if (!bulkstat && errno == EPERM)
+			errx(1, "ERROR: insufficient privileges");
+		cout << "INFO: source filesystem looks like "
+			<< ((bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
+			<< " -o inode" << (ino32 ? "32" : "64") << endl;
+	}
+	root->src_fh.nodeid = FUSE_ROOT_ID;
+}
+
+void Fs::init_root()
+{
+	root.reset(new Inode(fs.num_modules));
+	root->nlookup = 9999;
+
+	struct stat stat;
+	auto ret = lstat(source(), &stat);
+	if (ret == -1)
+		err(1, "ERROR: failed to stat source (\"%s\")", source());
+	if (!S_ISDIR(stat.st_mode))
+		errx(1, "ERROR: source is not a directory");
+	src_dev = stat.st_dev;
+	root->_ftype = ftype_dir;
+	get_root_fh(stat.st_ino);
 }
 
 // Short lived reference of inode to keep fd open
@@ -412,6 +453,10 @@ struct InodeRef : fuse_inode {
 	bool get_state(const fuse_passthrough_module &module, fuse_state_t &state) {
 		return i->module_states.get_state(module, state);
 	}
+	ino_t ino() const override { return i->ino(); }
+	ino_t gen() const override { return i->gen(); }
+	ino_t nodeid() const override { return i->nodeid(); }
+	file_handle *get_file_handle() const override { return &i->src_fh.fh; }
 
 	bool is_dir() const override {
 		return i->_ftype == ftype_dir;
@@ -443,12 +488,12 @@ struct InodeRef : fuse_inode {
 
 		fd = openfd ? i->_fd : 0;
 		if (fd == -1) {
-			fd = fs.open_by_ino(inode);
+			fd = fs.open_by_fh(inode->src_fh);
 		}
 		if (fd == -1) {
 			fd = -errno;
 			cerr << "INFO: failed to open fd for inode "
-				<< i->src_ino << endl;
+				<< ino() << endl;
 		}
 	}
 
@@ -789,19 +834,22 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		return saveerr;
 	}
 
-	int mount_id;
-	struct xfs_fh xfs_fh{};
-	if (fs.fhandles)
-		res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
-	if (res == -1) {
-		auto saveerr = errno;
-		if (fs.debug())
-			cerr << "DEBUG: lookup(): name_to_handle_at failed" << endl;
-		return saveerr;
-	}
-
 	auto src_ino = e->attr.st_ino;
-	auto root_ino = fs.root->src_ino;
+	auto root_ino = fs.root->ino();
+
+	int mount_id;
+	struct xfs_fh xfs_fh{src_ino};
+	if (fs.fhandles) {
+		res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+		if (res == -1) {
+			auto saveerr = errno;
+			if (fs.debug())
+				cerr << "DEBUG: lookup(): name_to_handle_at failed" << endl;
+			return saveerr;
+		}
+		if (!xfs_fh.decode() && fs.debug())
+			cerr << "DEBUG: lookup(): failed to decode file handle" << endl;
+	}
 
 	if (e->attr.st_dev != fs.src_dev) {
 		cerr << "WARNING: Mountpoints in the source directory tree will be hidden." << endl;
@@ -814,10 +862,6 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		// found root when reconnecting directory file handle, i.e. lookup(ino, "..")
 		e->ino = FUSE_ROOT_ID;
 		return 0;
-	} else if (!xfs_fh.decode()) {
-		// Use src_ino if we cannot decode
-		xfs_fh.nodeid = xfs_fh.ino = src_ino;
-		xfs_fh.gen = 0;
 	} else if (src_ino != xfs_fh.ino) {
 		cerr << "ERROR: Source st_ino " << src_ino <<
 			" and file handle ino " << xfs_fh.ino << " mismatch." << endl;
@@ -851,7 +895,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	// Fake lookup success by inserting a bad inode into map.
 	// Listing root dir works, but stat on non-subdir entries or on
 	// 2nd level subdirs returns ESTALE.
-	// 1st level subdirs keep an open fd, so don't need open_by_ino()
+	// 1st level subdirs keep an open fd, so don't need open_by_fh)
 	// on next lookup.
 	src_ino = FUSE_ROOT_ID;
 #endif
@@ -875,12 +919,12 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
 				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
-		if (inode.gen != xfs_fh.gen) {
+		if (inode.gen() != xfs_fh.gen) {
 			if (fs.debug())
 				cerr << "DEBUG: lookup(): inode " << src_ino
-					<< " generation " << inode.gen
+					<< " generation " << inode.gen()
 					<< " mismatch - reused inode." << endl;
-			inode.gen = xfs_fh.gen;
+			inode.src_fh = xfs_fh;
 		}
 		// Maybe update long lived fd if inode was initialized by lookup(".")
 		if (inode._fd == -1 && keep_fd)
@@ -893,8 +937,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		   thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
 		inode.set_ftype(e->attr.st_mode);
-		inode.src_ino = src_ino;
-		inode.gen = xfs_fh.gen;
+		inode.src_fh = xfs_fh;
 		inode.nlookup = 1;
 		if (keep_fd) {
 			// Hold long lived fd in inode
@@ -939,9 +982,17 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 			return;
 		}
 		inode_p.reset(i);
-		// request to open by FUSE file handle
+		// Request to open disconnected inode by FUSE file handle
+		// FUSE LOOKUP(ino, ".") does not pass the generation
 		inode_p->_fd = -1;
-		inode_p->src_ino = parent;
+		xfs_fh &fh = inode_p->src_fh;
+		fh.nodeid = fh.ino = parent;
+		// With XFS, we try to use bulkstat to get generation from ino
+		if (fs.bulkstat)
+			fh.gen = fs.xfs_bulkstat_gen(parent);
+		// Reconstruct file handle from <ino;gen>
+		if (fs.fhandles)
+			fh.encode(fs.ino32);
 	} else {
 		inode_p = get_inode(parent);
 	}
@@ -1250,21 +1301,21 @@ static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 	if (inode.dead())
 		return;
 
+	auto src_ino = inode.ino();
 	if (n > inode.nlookup) {
 		cerr << "INTERNAL ERROR: Negative lookup count ("
 			<< inode.nlookup << " - " << n <<
-			") for inode " << inode.src_ino << endl;
+			") for inode " << src_ino << endl;
 		n = inode.nlookup;
 	}
 	inode.nlookup -= n;
 	if (!inode.nlookup) {
-		auto src_ino = inode.src_ino;
 		auto backing_id = inode.backing_id;
 		int ninodes;
 		{
 			lock_guard<mutex> g_fs {fs.m};
 			// Mark dead inode to protect against racing with lookup
-			inode.src_ino = 0;
+			inode.src_fh.ino = 0;
 			fs.inodes.erase(ino);
 			ninodes = fs.inodes.size();
 		}
@@ -1284,7 +1335,7 @@ static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 		}
 
 	} else if (fs.debug()) {
-		cerr << "DEBUG: forget: inode " << inode.src_ino
+		cerr << "DEBUG: forget: inode " << src_ino
 			<< " lookup count now " << inode.nlookup << endl;
 	}
 }
@@ -2331,47 +2382,8 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 
 	// Initialize filesystem root
 	fs.num_modules = num_modules;
-	fs.root.reset(new Inode(num_modules));
-	fs.root->nlookup = 9999;
 	fs.opts = opts;
-
-	struct stat stat;
-	const char *source = opts.source.c_str();
-	auto ret = lstat(source, &stat);
-	if (ret == -1)
-		err(1, "ERROR: failed to stat source (\"%s\")", source);
-	if (!S_ISDIR(stat.st_mode))
-		errx(1, "ERROR: source is not a directory");
-	fs.src_dev = stat.st_dev;
-	fs.root->_ftype = ftype_dir;
-	fs.root->src_ino = stat.st_ino;
-
-	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
-	fs.root->_fd = open(source, O_DIRECTORY | O_RDONLY);
-	if (fs.root->_fd == -1)
-		err(1, "ERROR: open(\"%s\")", source);
-
-	int mount_id;
-	struct xfs_fh xfs_fh{};
-	ret = name_to_handle_at(fs.root->_fd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
-	if (ret == -1)
-		err(1, "ERROR: name_to_handle_at(\"%s\")", source);
-
-	if (!xfs_fh.decode()) {
-		// Will keep open O_PATH fd instead of open_by_handle()
-		fs.fhandles = false;
-		warn("WARNING: source filesystem file handle type not supported");
-	} else {
-		// Auto detect xfs with -o inode32 (or ext4)
-		fs.ino32 = xfs_fh.is_ino32();
-		// bulkstat support is an indication of xfs
-		fs.bulkstat = fs.xfs_bulkstat_gen(fs.root->src_ino);
-		if (!fs.bulkstat && errno == EPERM)
-			errx(1, "ERROR: insufficient privileges");
-		cout << "INFO: source filesystem looks like "
-			<< ((fs.bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
-			<< " -o inode" << (fs.ino32 ? "32" : "64") << endl;
-	}
+	fs.init_root();
 
 	if (oper_size != sizeof(fs.oper))
 		errx(1, "ERROR: incompatible library ABI");
@@ -2387,6 +2399,8 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 		modules++;
 	}
 
+	// Initialize fuse
+	auto ret = -1;
 	fuse_lowlevel_ops pfs_oper {};
 	assign_lowlevel_ops(pfs_oper);
 	auto se = fuse_session_new(args, &pfs_oper, sizeof(pfs_oper), &fs);
