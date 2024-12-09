@@ -1138,13 +1138,20 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
 	if (conn->capable & FUSE_CAP_POSIX_ACL)
 		conn->want |= FUSE_CAP_POSIX_ACL;
 
-	// Use splicing if supported. Since we are using writeback caching
-	// and readahead, individual requests should have a decent size so
-	// that splicing between fd's is well worth it.
-	if (conn->capable & FUSE_CAP_SPLICE_WRITE && !fs.nosplice)
-		conn->want |= FUSE_CAP_SPLICE_WRITE;
-	if (conn->capable & FUSE_CAP_SPLICE_READ && !fs.nosplice)
-		conn->want |= FUSE_CAP_SPLICE_READ;
+	if (fs.nosplice) {
+		// FUSE_CAP_SPLICE_READ is enabled in libfuse3 by default,
+		// see do_init() in in fuse_lowlevel.c
+		// Just unset both, in case FUSE_CAP_SPLICE_WRITE would also get enabled
+		// by detault.
+		conn->want &= ~FUSE_CAP_SPLICE_READ;
+		conn->want &= ~FUSE_CAP_SPLICE_WRITE;
+	} else {
+		if (conn->capable & FUSE_CAP_SPLICE_WRITE)
+			conn->want |= FUSE_CAP_SPLICE_WRITE;
+		if (conn->capable & FUSE_CAP_SPLICE_READ)
+			conn->want |= FUSE_CAP_SPLICE_READ;
+	}
+
 	if (fs.rwpassthrough) {
 		if (conn->capable & FUSE_CAP_PASSTHROUGH)
 			conn->want |= FUSE_CAP_PASSTHROUGH;

@@ -13,10 +13,10 @@
  *
  * Compile with:
  *
- *     gcc -Wall protocol_info.c `pkg-config fuse3 --cflags --libs` -o protocol_info
+ *     gcc -Wall printcap.c `pkg-config fuse3 --cflags --libs` -o printcap
  *
  * ## Source code ##
- * \include @file
+ * \include printcap.c
  */
 
 #define FUSE_USE_VERSION 31
@@ -39,8 +39,6 @@ static void pc_init(void *userdata,
 	printf("Protocol version: %d.%d\n", conn->proto_major,
 	       conn->proto_minor);
 	printf("Capabilities:\n");
-	if(conn->capable & FUSE_CAP_WRITEBACK_CACHE)
-		printf("\tFUSE_CAP_WRITEBACK_CACHE\n");
 	if(conn->capable & FUSE_CAP_ASYNC_READ)
 			printf("\tFUSE_CAP_ASYNC_READ\n");
 	if(conn->capable & FUSE_CAP_POSIX_LOCKS)
@@ -77,13 +75,17 @@ static void pc_init(void *userdata,
 			printf("\tFUSE_CAP_PARALLEL_DIROPS\n");
 	if(conn->capable & FUSE_CAP_POSIX_ACL)
 			printf("\tFUSE_CAP_POSIX_ACL\n");
+	if(conn->capable & FUSE_CAP_CACHE_SYMLINKS)
+			printf("\tFUSE_CAP_CACHE_SYMLINKS\n");
 	if(conn->capable & FUSE_CAP_NO_OPENDIR_SUPPORT)
 			printf("\tFUSE_CAP_NO_OPENDIR_SUPPORT\n");
+	if(conn->capable & FUSE_CAP_EXPLICIT_INVAL_DATA)
+			printf("\tFUSE_CAP_EXPLICIT_INVAL_DATA\n");
 	fuse_session_exit(se);
 }
 
 
-static struct fuse_lowlevel_ops pc_oper = {
+static const struct fuse_lowlevel_ops pc_oper = {
 	.init		= pc_init,
 };
 

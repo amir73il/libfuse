@@ -18,7 +18,7 @@
  * \include hello_ll.c
  */
 
-#define FUSE_USE_VERSION 31
+#define FUSE_USE_VERSION 34
 
 #include <fuse_lowlevel.h>
 #include <stdio.h>
@@ -153,7 +153,7 @@ static void hello_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 	reply_buf_limited(req, hello_str, strlen(hello_str), off, size);
 }
 
-static struct fuse_lowlevel_ops hello_ll_oper = {
+static const struct fuse_lowlevel_ops hello_ll_oper = {
 	.lookup		= hello_ll_lookup,
 	.getattr	= hello_ll_getattr,
 	.readdir	= hello_ll_readdir,
@@ -166,6 +166,7 @@ int main(int argc, char *argv[])
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	struct fuse_session *se;
 	struct fuse_cmdline_opts opts;
+	struct fuse_loop_config config;
 	int ret = -1;
 
 	if (fuse_parse_cmdline(&args, &opts) != 0)
@@ -206,8 +207,11 @@ int main(int argc, char *argv[])
 	/* Block until ctrl+c or fusermount -u */
 	if (opts.singlethread)
 		ret = fuse_session_loop(se);
-	else
-		ret = fuse_session_loop_mt(se, opts.clone_fd);
+	else {
+		config.clone_fd = opts.clone_fd;
+		config.max_idle_threads = opts.max_idle_threads;
+		ret = fuse_session_loop_mt(se, &config);
+	}
 
 	fuse_session_unmount(se);
 err_out3:

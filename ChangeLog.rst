@@ -1,3 +1,98 @@
+libfuse 3.11.0 (2022-05-02)
+===========================
+
+* Add support for flag FOPEN_NOFLUSH for avoiding flush on close.
+* Fixed returning an error condition to ioctl(2)
+
+
+libfuse 3.10.5 (2021-09-06)
+===========================
+
+* Various improvements to make unit tests more robust.
+
+
+libfuse 3.10.4 (2021-06-09)
+===========================
+
+* Building of unit tests is now optional.
+* Fixed a test failure when running tests under XFS.
+* Fixed memory leaks in examples.
+* Minor documentation fixes.  
+
+libfuse 3.10.3 (2021-04-12)
+===========================
+
+* Fix returning d_ino and d_type from readdir(3) in non-plus mode
+  
+libfuse 3.10.2 (2021-02-05)
+===========================
+
+* Allow "nonempty" as a mount option, for backwards compatibility with fusermount 2. The
+  option has no effect since mounting over non-empty directories is allowed by default.
+* Fix returning inode numbers from readdir() in offset==0 mode.
+* FUSE filesystems can now be mounted underneath EXFAT mountpoints.
+* Various minor bugfixes.  
+
+libfuse 3.10.1 (2020-12-07)
+===========================
+
+* Various minor bugfixes.
+
+libfuse 3.10.0 (2020-10-09)
+===========================
+
+* Add FUSE_CAP_CACHE_SYMLINKS: allow caching symlinks in kernel page cache.
+* Various minor bugfixes and improvements.  
+
+libfuse 3.9.4 (2020-08-09)
+==========================
+
+This was an "accidental" release, it is equivalent to 3.9.3.
+
+libfuse 3.9.3 (2020-08-09)
+==========================
+
+* Fixed compilation under OS X and µClibc.
+* Minor bugfixes and doc updates.
+
+libfuse 3.9.2 (2020-06-12)
+==========================
+
+* Remove obsolete workarounds in examples.
+* Do not require C++ compiler for building.
+* Minor bugfixes.
+
+libfuse 3.9.1 (2020-03-19)
+===========================
+
+* Fixed memory leak in fuse_session_new().
+* Fixed an issue with the linker version script.
+* Make ioctl prototype conditional on FUSE_USE_VERSION.  Define FUSE_USE_VERSION < 35 to
+  get old ioctl prototype with int commands; define FUSE_USE_VERSION >= 35 to get new
+  ioctl prototype with unsigned int commands.
+* Various small bugfixes.
+
+libfuse 3.9.0 (2019-12-14)
+==========================
+
+* Added support for FUSE_EXPLICIT_INVAL_DATA to enable
+  only invalidate cached pages on explicit request.
+
+libfuse 3.8.0 (2019-11-03)
+==========================
+
+* Added support for FUSE_LSEEK operation which can be used to report holes
+  in sparse files.
+
+libfuse 3.7.0 (2019-09-27)
+==========================
+
+* Added UFSD to whitelist (so users can now mount FUSE filesystems
+  on mountpoints within UFSD filesystems).
+* Added custom log message handler function support so that libfuse
+  applications can direct messages to syslog(3) or other logging systems.
+  stderr remains the default.  See `fuse_log.h` for the new API.
+
 libfuse 3.6.2 (2019-07-09)
 ==========================
 
@@ -334,7 +429,7 @@ libfuse 3.0.0 (2016-12-08)
 
 * The ``-o nopath`` option has been dropped - it never actually did
   anything (since it is unconditionally overwritten with the value of
-  the `nopath` flag in `struct fuse_operations).
+  the `nopath` flag in `struct fuse_operations`).
 
 * The ``-o large_read`` mount option has been dropped. Hopefully no
   one uses a Linux 2.4 kernel anymore.
@@ -358,7 +453,7 @@ libfuse 3.0.0 (2016-12-08)
 
 * The `fuse_session_new` function no longer accepts the ``-o
   clone_fd`` option. Instead, this has become a parameter of the
-  `fuse_session_loop_mt` and ``fuse_loop_mt` functions.
+  `fuse_session_loop_mt` and `fuse_loop_mt` functions.
 
 * For low-level file systems that implement the `write_buf` handler,
   the `splice_read` option is now enabled by default. As usual, this
@@ -548,7 +643,7 @@ libfuse 3.0.0 (2016-12-08)
 * The *fuse_off_t* and *fuse_ino_t* changed from *unsigned long* to
   *uint64_t*, i.e. they are now 64 bits also on 32-bit systems.
 
-* The type of the *generation* member of `struct fuse_entry_param*
+* The type of the *generation* member of `struct fuse_entry_param*`
   changed from *unsigned* to *uint64_t*.
 
 * The (low-level) `setattr` handler gained a *FUSE_SET_ATTR_CTIME* bit

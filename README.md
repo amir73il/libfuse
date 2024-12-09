@@ -35,7 +35,7 @@ releases, but unfortunately has no capacity to do any development
 beyond addressing high-impact issues. When reporting bugs, please
 understand that unless you are including a pull request or are
 reporting a critical issue, you will probably not get a response. If
-you are using libfuse, please consider to contribute to the project.
+you are using libfuse, please consider contributing to the project.
 
 
 Supported Platforms
@@ -50,8 +50,8 @@ Installation
 ------------
 
 You can download libfuse from
-https://github.com/libfuse/libfuse/releases. To build and install, we
-recommend to use [Meson](http://mesonbuild.com/) and
+https://github.com/libfuse/libfuse/releases. To build and install, you
+must use [Meson](http://mesonbuild.com/) and
 [Ninja](https://ninja-build.org).  After extracting the libfuse
 tarball, create a (temporary) build directory and run Meson:
 
@@ -59,13 +59,13 @@ tarball, create a (temporary) build directory and run Meson:
     $ meson ..
 
 Normally, the default build options will work fine. If you
-nevertheless want to adjust them, you can do so with the *mesonconf*
-command:
+nevertheless want to adjust them, you can do so with the
+*meson configure* command:
 
-    $ mesonconf # list options
-    $ mesonconf  -D disable-mtab=true # set an option
+    $ meson configure # list options
+    $ meson configure -D disable-mtab=true # set an option
 
-To build, test and install libfuse, you then use Ninja:
+To build, test, and install libfuse, you then use Ninja:
 
     $ ninja
     $ sudo python3 -m pytest test/
@@ -89,7 +89,7 @@ allow normal users to mount their own filesystem implementations.
 To limit the harm that malicious users can do this way, *fusermount3*
 enforces the following limitations:
 
-  - The user can only mount on a mountpoint for which he has write
+  - The user can only mount on a mountpoint for which they have write
     permission
 
   - The mountpoint must not be a sticky directory which isn't owned by
@@ -126,7 +126,7 @@ attributes.
 Building your own filesystem
 ------------------------------
 
-FUSE comes with several example file systems in the `examples`
+FUSE comes with several example file systems in the `example`
 directory. For example, the *passthrough* examples mirror the contents
 of the root directory under the mountpoint. Start from there and adapt
 the code!
@@ -147,10 +147,3 @@ https://lists.sourceforge.net/lists/listinfo/fuse-devel).
 
 Please report any bugs on the GitHub issue tracker at
 https://github.com/libfuse/libfuse/issues.
-
-
-Professional Support
---------------------
-
-Professional support is offered via [Rath
-Consulting](http://www.rath-consulting.biz).

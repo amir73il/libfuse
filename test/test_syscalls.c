@@ -48,6 +48,7 @@ static int testdata2len = sizeof(testdata2) - 1;
 static unsigned int testnum = 0;
 static unsigned int select_test = 0;
 static unsigned int skip_test = 0;
+static unsigned int unlinked_test = 0;
 
 #define MAX_ENTRIES 1024
 #define MAX_TESTS 100
@@ -568,6 +569,9 @@ static int check_unlinked_testfiles(void)
 	int fd;
 	int res, err = 0;
 	int num = testnum;
+
+	if (!unlinked_test)
+		return 0;
 
 	testnum = 0;
 	while (testnum < num) {
@@ -1977,7 +1981,7 @@ int main(int argc, char *argv[])
 
 	umask(0);
 	if (argc < 2 || argc > 4) {
-		fprintf(stderr, "usage: %s testdir [:realdir] [[-]test#]\n", argv[0]);
+		fprintf(stderr, "usage: %s testdir [:realdir] [[-]test#] [-u]\n", argv[0]);
 		return 1;
 	}
 	basepath = argv[1];
@@ -1990,12 +1994,17 @@ int main(int argc, char *argv[])
 		} else {
 			if (arg[0] == '-') {
 				arg++;
-				skip_test = strtoul(arg, &endptr, 10);
+				if (arg[0] == 'u') {
+					unlinked_test = 1;
+					endptr = arg + 1;
+				} else {
+					skip_test = strtoul(arg, &endptr, 10);
+				}
 			} else {
 				select_test = strtoul(arg, &endptr, 10);
 			}
 			if (arg[0] == '\0' || *endptr != '\0') {
-				fprintf(stderr, "invalid number: '%s'\n", arg);
+				fprintf(stderr, "invalid option: '%s'\n", argv[a]);
 				return 1;
 			}
 		}

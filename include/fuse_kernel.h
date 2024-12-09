@@ -44,6 +44,7 @@
  *  - add lock_owner field to fuse_setattr_in, fuse_read_in and fuse_write_in
  *  - add blksize field to fuse_attr
  *  - add file flags field to fuse_read_in and fuse_write_in
+ *  - Add ATIME_NOW and MTIME_NOW flags to fuse_setattr_in
  *
  * 7.10
  *  - add nonseekable open flag
@@ -125,6 +126,13 @@
  *
  *  7.29
  *  - add FUSE_NO_OPENDIR_SUPPORT flag
+ *
+ *  7.30
+ *  - add FUSE_EXPLICIT_INVAL_DATA
+ *  - add FUSE_IOCTL_COMPAT_X32
+ *
+ *  7.31
+ *  - add FUSE_WRITE_KILL_PRIV flag
  */
 
 #ifndef _LINUX_FUSE_H
@@ -160,7 +168,7 @@
 #define FUSE_KERNEL_VERSION 7
 
 /** Minor version number of this interface */
-#define FUSE_KERNEL_MINOR_VERSION 29
+#define FUSE_KERNEL_MINOR_VERSION 31
 
 /** The node ID of the root inode */
 #define FUSE_ROOT_ID 1
@@ -229,13 +237,14 @@ struct fuse_file_lock {
  * FOPEN_KEEP_CACHE: don't invalidate the data cache on open
  * FOPEN_NONSEEKABLE: the file is not seekable
  * FOPEN_CACHE_DIR: allow caching this directory
- * FOPEN_NOFLUSH: don't flush data cache on every close
+ * FOPEN_STREAM: the file is stream-like (no file position at all)
+ * FOPEN_NOFLUSH: don't flush data cache on close (unless FUSE_WRITEBACK_CACHE)
  */
 #define FOPEN_DIRECT_IO		(1 << 0)
 #define FOPEN_KEEP_CACHE	(1 << 1)
 #define FOPEN_NONSEEKABLE	(1 << 2)
 #define FOPEN_CACHE_DIR		(1 << 3)
-/*#define FOPEN_STREAM		(1 << 4)*/
+#define FOPEN_STREAM		(1 << 4)
 #define FOPEN_NOFLUSH		(1 << 5)
 
 /**
@@ -266,6 +275,7 @@ struct fuse_file_lock {
  * FUSE_MAX_PAGES: init_out.max_pages contains the max number of req pages
  * FUSE_CACHE_SYMLINKS: cache READLINK responses
  * FUSE_NO_OPENDIR_SUPPORT: kernel supports zero-message opendir
+ * FUSE_EXPLICIT_INVAL_DATA: only invalidate cached pages on explicit request
  */
 #define FUSE_ASYNC_READ		(1 << 0)
 #define FUSE_POSIX_LOCKS	(1 << 1)
@@ -292,8 +302,19 @@ struct fuse_file_lock {
 #define FUSE_MAX_PAGES		(1 << 22)
 #define FUSE_CACHE_SYMLINKS	(1 << 23)
 #define FUSE_NO_OPENDIR_SUPPORT (1 << 24)
-/*#define FUSE_EXPLICIT_INVAL_DATA (1 << 25)*/
+#define FUSE_EXPLICIT_INVAL_DATA (1 << 25)
+#define FUSE_MAP_ALIGNMENT	(1 << 26)
+#define FUSE_SUBMOUNTS		(1 << 27)
+#define FUSE_HANDLE_KILLPRIV_V2	(1 << 28)
+/* FUSE_KERNEL_MINOR_VERSION == 32 (CTERA patch) */
 #define FUSE_PASSTHROUGH	(1 << 29)
+/* FUSE_KERNEL_MINOR_VERSION > 32 */
+#define FUSE_SETXATTR_EXT	(1 << 29)
+#define FUSE_INIT_EXT		(1 << 30)
+#define FUSE_INIT_RESERVED	(1 << 31)
+/* bits 32..63 get shifted down 32 bits into the flags2 field */
+#define FUSE_SECURITY_CTX	(1ULL << 32)
+#define FUSE_HAS_INODE_DAX	(1ULL << 33)
 
 /**
  * CUSE INIT request/reply flags
@@ -323,9 +344,11 @@ struct fuse_file_lock {
  *
  * FUSE_WRITE_CACHE: delayed write from page cache, file handle is guessed
  * FUSE_WRITE_LOCKOWNER: lock_owner field is valid
+ * FUSE_WRITE_KILL_PRIV: kill suid and sgid bits
  */
 #define FUSE_WRITE_CACHE	(1 << 0)
 #define FUSE_WRITE_LOCKOWNER	(1 << 1)
+#define FUSE_WRITE_KILL_PRIV	(1 << 2)
 
 /**
  * Read flags
@@ -340,6 +363,7 @@ struct fuse_file_lock {
  * FUSE_IOCTL_RETRY: retry with new iovecs
  * FUSE_IOCTL_32BIT: 32bit ioctl
  * FUSE_IOCTL_DIR: is a directory
+ * FUSE_IOCTL_COMPAT_X32: x32 compat ioctl on 64bit machine (64bit time_t)
  *
  * FUSE_IOCTL_MAX_IOV: maximum of in_iovecs + out_iovecs
  */
@@ -348,6 +372,7 @@ struct fuse_file_lock {
 #define FUSE_IOCTL_RETRY	(1 << 2)
 #define FUSE_IOCTL_32BIT	(1 << 3)
 #define FUSE_IOCTL_DIR		(1 << 4)
+#define FUSE_IOCTL_COMPAT_X32	(1 << 5)
 
 #define FUSE_IOCTL_MAX_IOV	256
 
@@ -357,6 +382,13 @@ struct fuse_file_lock {
  * FUSE_POLL_SCHEDULE_NOTIFY: request poll notify
  */
 #define FUSE_POLL_SCHEDULE_NOTIFY (1 << 0)
+
+/**
+ * Fsync flags
+ *
+ * FUSE_FSYNC_FDATASYNC: Sync data only, not metadata
+ */
+#define FUSE_FSYNC_FDATASYNC	(1 << 0)
 
 enum fuse_opcode {
 	FUSE_LOOKUP		= 1,
@@ -406,7 +438,7 @@ enum fuse_opcode {
 	FUSE_COPY_FILE_RANGE	= 47,
 
 	/* CUSE specific operations */
-	CUSE_INIT		= 4096,
+	CUSE_INIT		= 4096
 };
 
 enum fuse_notify_code {
@@ -416,7 +448,7 @@ enum fuse_notify_code {
 	FUSE_NOTIFY_STORE = 4,
 	FUSE_NOTIFY_RETRIEVE = 5,
 	FUSE_NOTIFY_DELETE = 6,
-	FUSE_NOTIFY_CODE_MAX,
+	FUSE_NOTIFY_CODE_MAX
 };
 
 /* The read buffer is required to be at least 8k, but may be much larger */
@@ -626,6 +658,8 @@ struct fuse_init_in {
 	uint32_t	minor;
 	uint32_t	max_readahead;
 	uint32_t	flags;
+	uint32_t	flags2;
+	uint32_t	unused[11];
 };
 
 #define FUSE_COMPAT_INIT_OUT_SIZE 8
@@ -641,8 +675,9 @@ struct fuse_init_out {
 	uint32_t	max_write;
 	uint32_t	time_gran;
 	uint16_t	max_pages;
-	uint16_t	padding;
-	uint32_t	unused[8];
+	uint16_t	map_alignment;
+	uint32_t	flags2;
+	uint32_t	unused[7];
 };
 
 #define CUSE_INIT_INFO_MAX 4096

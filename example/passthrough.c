@@ -479,14 +479,38 @@ static ssize_t xmp_copy_file_range(const char *path_in,
 	if (res == -1)
 		res = -errno;
 
-	close(fd_in);
-	close(fd_out);
+	if (fi_out == NULL)
+		close(fd_out);
+	if (fi_in == NULL)
+		close(fd_in);
 
 	return res;
 }
 #endif
 
-static struct fuse_operations xmp_oper = {
+static off_t xmp_lseek(const char *path, off_t off, int whence, struct fuse_file_info *fi)
+{
+	int fd;
+	off_t res;
+
+	if (fi == NULL)
+		fd = open(path, O_RDONLY);
+	else
+		fd = fi->fh;
+
+	if (fd == -1)
+		return -errno;
+
+	res = lseek(fd, off, whence);
+	if (res == -1)
+		res = -errno;
+
+	if (fi == NULL)
+		close(fd);
+	return res;
+}
+
+static const struct fuse_operations xmp_oper = {
 	.init           = xmp_init,
 	.getattr	= xmp_getattr,
 	.access		= xmp_access,
@@ -524,6 +548,7 @@ static struct fuse_operations xmp_oper = {
 #ifdef HAVE_COPY_FILE_RANGE
 	.copy_file_range = xmp_copy_file_range,
 #endif
+	.lseek		= xmp_lseek,
 };
 
 int main(int argc, char *argv[])
