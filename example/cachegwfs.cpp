@@ -126,6 +126,8 @@ static const char *op_name(enum op op) {
 
 // Redirect config that can be changed in runtime
 struct Redirect {
+	time_t read_once_older {0};
+	time_t read_once_grace {0};
 	vector<string> read_xattr;
 	vector<string> write_xattr;
 	vector<string> readdir_xattr;
@@ -148,6 +150,19 @@ struct Redirect {
 		folder_ids.insert(folder_id);
 	}
 
+	// Either read_once_older or read_once_grace may end up redirecting on read
+	bool read_once_enabled() {
+		return read_once_older || read_once_grace;
+	}
+	bool test_read_once(const struct stat &st) {
+		// No need to scan an empty file (which is often the case with O_CREAT)
+		if (!read_once_enabled() || st.st_size == 0)
+			return false;
+		time_t t = read_once_older ?: time(NULL);
+		return st.st_atime <= st.st_mtime ||
+			st.st_atime <= t - read_once_grace;
+	}
+
 	void set_op(const string &name) {
 		auto it = find_if(op_names.begin(), op_names.end(),
 				[name](decltype(*op_names.begin()) &p) {
@@ -164,6 +179,20 @@ struct Redirect {
 			folder_ids.insert(folder_id);
 		else
 			cerr << "WARNING: illegal redirect folder id " << name << endl;
+	}
+	void set_read_once(const string &name, bool grace) {
+		time_t t = 0;
+		try {
+			t = stoll(name.c_str());
+		} catch (const exception &ex) {
+			cerr << "WARNING: illegal timestamp '" << name << "': " << ex.what() << endl;
+		}
+		if (t < 0)
+			cerr << "WARNING: negative timestamp '" << name << "' is ignored" << endl;
+		else if (grace)
+			read_once_grace = t;
+		else
+			read_once_older = t;
 	}
 };
 
@@ -366,9 +395,38 @@ static bool should_redirect_folder_id(const fuse_path_at &at)
 	return false;
 }
 
+static bool should_redirect_once(const fuse_path_at &at)
+{
+	auto r = fs.redirect();
+	if (!r->read_once_enabled())
+		return false;
+
+	struct stat st;
+	if (fstatat(at.dirfd(), at.path(), &st, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+		return false;
+
+	// Now test if this specific file needs to be redirected once
+	if (r->test_read_once(st)) {
+		if (fs.debug())
+			cerr << "DEBUG: redirect once @" << time(NULL) << ","
+				<< " ino=" << st.st_ino << ","
+				<< " size=" << st.st_size << ","
+				<< " atime=" << st.st_atime << ","
+				<< " mtime=" << st.st_mtime << ","
+				<< " older=" << r->read_once_older << ","
+				<< " grace=" << r->read_once_grace << "." << endl;
+		return true;
+	}
+
+	return false;
+}
+
 static enum op redirect_open_op(const fuse_path_at &at, fuse_file_info *fi)
 {
 	enum op op;
+
+	if (should_redirect_once(at))
+		return OP_REDIRECT;
 
 	if (fi->flags & O_CREAT)
 		op = OP_CREATE;
@@ -1008,6 +1066,10 @@ static Redirect *read_config_file()
 			redirect->set_folder_id(value);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
+		} else if (name == "redirect_read_once_older") {
+			redirect->set_read_once(value, false);
+		} else if (name == "redirect_read_once_grace") {
+			redirect->set_read_once(value, true);
 		} else if (name == "redirect_op") {
 			redirect->set_op(value);
 		}
