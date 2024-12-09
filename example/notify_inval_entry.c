@@ -11,8 +11,8 @@
  * This example implements a file system with a single file whose
  * file name changes dynamically to reflect the current time.
  *
- * It illustrates the use of the fuse_lowlevel_notify_inval_entry()
- * function.
+ * It illustrates the use of the fuse_lowlevel_notify_inval_entry() and
+ * fuse_lowlevel_notify_expire_entry() functions.
  *
  * To see the effect, first start the file system with the
  * ``--no-notify``
@@ -64,6 +64,9 @@
  *     $ sleep 1; stat mnt/$file
  *     stat: cannot stat ‘mnt/Time_is_20h_42m_11s’: No such file or directory
  *
+ * To use the function fuse_lowlevel_notify_expire_entry() instead of
+ * fuse_lowlevel_notify_inval_entry(), use the command line option --only-expire
+ *
  * ## Compilation ##
  *
  *     gcc -Wall notify_inval_entry.c `pkg-config fuse3 --cflags --libs` -o notify_inval_entry
@@ -82,7 +85,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <signal.h>
 #include <stddef.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -90,17 +95,20 @@
 static char file_name[MAX_STR_LEN];
 static fuse_ino_t file_ino = 2;
 static int lookup_cnt = 0;
+static pthread_t main_thread;
 
 /* Command line parsing */
 struct options {
     int no_notify;
     float timeout;
     int update_interval;
+    int only_expire;
 };
 static struct options options = {
     .timeout = 5,
     .no_notify = 0,
     .update_interval = 1,
+    .only_expire = 0,
 };
 
 #define OPTION(t, p)                           \
@@ -109,6 +117,7 @@ static const struct fuse_opt option_spec[] = {
     OPTION("--no-notify", no_notify),
     OPTION("--update-interval=%d", update_interval),
     OPTION("--timeout=%f", timeout),
+    OPTION("--only-expire", only_expire),
     FUSE_OPT_END
 };
 
@@ -247,12 +256,36 @@ static void* update_fs_loop(void *data) {
     struct fuse_session *se = (struct fuse_session*) data;
     char *old_name;
 
-    while(1) {
+
+    while(!fuse_session_exited(se)) {
         old_name = strdup(file_name);
         update_fs();
-        if (!options.no_notify && lookup_cnt)
-            assert(fuse_lowlevel_notify_inval_entry
-                   (se, FUSE_ROOT_ID, old_name, strlen(old_name)) == 0);
+
+        if (!options.no_notify && lookup_cnt) {
+            if(options.only_expire) { // expire entry
+                int ret = fuse_lowlevel_notify_expire_entry
+                   (se, FUSE_ROOT_ID, old_name, strlen(old_name));
+
+                // no kernel support
+                if (ret == -ENOSYS) {
+                    printf("fuse_lowlevel_notify_expire_entry not supported by kernel\n");
+                    printf("Exiting...\n");
+
+                    fuse_session_exit(se);
+                    // Make sure to exit now, rather than on next request from userspace
+                    pthread_kill(main_thread, SIGPIPE);
+
+                    break;
+                }
+                // 1) ret == 0: successful expire of an existing entry
+                // 2) ret == -ENOENT: kernel has already expired the entry /
+                //                    entry does not exist anymore in the kernel
+                assert(ret == 0 || ret == -ENOENT);
+            } else { // invalidate entry
+                assert(fuse_lowlevel_notify_inval_entry
+                      (se, FUSE_ROOT_ID, old_name, strlen(old_name)) == 0);
+            }
+        }
         free(old_name);
         sleep(options.update_interval);
     }
@@ -266,6 +299,7 @@ static void show_help(const char *progname)
                "    --timeout=<secs>       Timeout for kernel caches\n"
                "    --update-interval=<secs>  Update-rate of file system contents\n"
                "    --no-notify            Disable kernel notifications\n"
+               "    --only-expire            Expire entries instead of invalidating them\n"
                "\n");
 }
 
@@ -273,7 +307,7 @@ int main(int argc, char *argv[]) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     struct fuse_session *se;
     struct fuse_cmdline_opts opts;
-    struct fuse_loop_config config;
+    struct fuse_loop_config *config;
     pthread_t updater;
     int ret = -1;
 
@@ -299,7 +333,7 @@ int main(int argc, char *argv[]) {
     update_fs();
 
     se = fuse_session_new(&args, &tfs_oper,
-                          sizeof(tfs_oper), NULL);
+                          sizeof(tfs_oper), &se);
     if (se == NULL)
         goto err_out1;
 
@@ -311,6 +345,11 @@ int main(int argc, char *argv[]) {
 
     fuse_daemonize(opts.foreground);
 
+    // Needed to ensure that the main thread continues/restarts processing as soon
+    // as the fuse session ends (immediately after calling fuse_session_exit() ) 
+    // and not only on the next request from userspace
+    main_thread = pthread_self();
+
     /* Start thread to update file contents */
     ret = pthread_create(&updater, NULL, update_fs_loop, (void *)se);
     if (ret != 0) {
@@ -320,12 +359,15 @@ int main(int argc, char *argv[]) {
     }
 
     /* Block until ctrl+c or fusermount -u */
-    if (opts.singlethread)
+    if (opts.singlethread) {
         ret = fuse_session_loop(se);
-    else {
-        config.clone_fd = opts.clone_fd;
-        config.max_idle_threads = opts.max_idle_threads;
-        ret = fuse_session_loop_mt(se, &config);
+    } else {
+		config = fuse_loop_cfg_create();
+		fuse_loop_cfg_set_clone_fd(config, opts.clone_fd);
+		fuse_loop_cfg_set_max_threads(config, opts.max_threads);
+		ret = fuse_session_loop_mt(se, config);
+		fuse_loop_cfg_destroy(config);
+		config = NULL;
     }
 
     fuse_session_unmount(se);

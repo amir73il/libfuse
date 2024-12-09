@@ -35,9 +35,7 @@
  */
 
 #define _GNU_SOURCE
-#define FUSE_USE_VERSION 34
-
-#include "config.h"
+#define FUSE_USE_VERSION FUSE_MAKE_VERSION(3, 12)
 
 #include <fuse_lowlevel.h>
 #include <fuse_helpers.h>
@@ -92,7 +90,7 @@ struct lo_data {
 	int writeback;
 	int flock;
 	int xattr;
-	const char *source;
+	char *source;
 	double timeout;
 	int cache;
 	int timeout_set;
@@ -173,9 +171,6 @@ static void lo_init(void *userdata,
 {
 	struct lo_data *lo = (struct lo_data*) userdata;
 
-	if(conn->capable & FUSE_CAP_EXPORT_SUPPORT)
-		conn->want |= FUSE_CAP_EXPORT_SUPPORT;
-
 	if (lo->writeback &&
 	    conn->capable & FUSE_CAP_WRITEBACK_CACHE) {
 		if (lo->debug)
@@ -196,6 +191,7 @@ static void lo_destroy(void *userdata)
 	while (lo->root.next != &lo->root) {
 		struct lo_inode* next = lo->root.next;
 		lo->root.next = next->next;
+		close(next->fd);
 		free(next);
 	}
 }
@@ -772,6 +768,11 @@ static void lo_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	else if (lo->cache == CACHE_ALWAYS)
 		fi->keep_cache = 1;
 
+	/* parallel_direct_writes feature depends on direct_io features.
+	   To make parallel_direct_writes valid, need set fi->direct_io
+	   in current function. */
+	fi->parallel_direct_writes = 1;
+
 	err = lo_do_lookup(req, parent, name, &e);
 	if (err)
 		fuse_reply_err(req, err);
@@ -828,6 +829,18 @@ static void lo_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 		fi->direct_io = 1;
 	else if (lo->cache == CACHE_ALWAYS)
 		fi->keep_cache = 1;
+
+        /* Enable direct_io when open has flags O_DIRECT to enjoy the feature
+        parallel_direct_writes (i.e., to get a shared lock, not exclusive lock,
+	for writes to the same file in the kernel). */
+	if (fi->flags & O_DIRECT)
+		fi->direct_io = 1;
+
+	/* parallel_direct_writes feature depends on direct_io features.
+	   To make parallel_direct_writes valid, need set fi->direct_io
+	   in current function. */
+	fi->parallel_direct_writes = 1;
+
 	fuse_reply_open(req, fi);
 }
 
@@ -1180,7 +1193,7 @@ int main(int argc, char *argv[])
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	struct fuse_session *se;
 	struct fuse_cmdline_opts opts;
-	struct fuse_loop_config config;
+	struct fuse_loop_config *config;
 	struct lo_data lo = { .debug = 0,
 	                      .writeback = 0 };
 	int ret = -1;
@@ -1237,7 +1250,11 @@ int main(int argc, char *argv[])
 		}
 
 	} else {
-		lo.source = "/";
+		lo.source = strdup("/");
+		if(!lo.source) {
+			fuse_log(FUSE_LOG_ERR, "fuse: memory allocation failed\n");
+			exit(1);
+		}
 	}
 	if (!lo.timeout_set) {
 		switch (lo.cache) {
@@ -1282,9 +1299,12 @@ int main(int argc, char *argv[])
 	if (opts.singlethread)
 		ret = fuse_session_loop(se);
 	else {
-		config.clone_fd = opts.clone_fd;
-		config.max_idle_threads = opts.max_idle_threads;
-		ret = fuse_session_loop_mt(se, &config);
+		config = fuse_loop_cfg_create();
+		fuse_loop_cfg_set_clone_fd(config, opts.clone_fd);
+		fuse_loop_cfg_set_max_threads(config, opts.max_threads);
+		ret = fuse_session_loop_mt(se, config);
+		fuse_loop_cfg_destroy(config);
+		config = NULL;
 	}
 
 	fuse_session_unmount(se);
@@ -1299,5 +1319,6 @@ err_out1:
 	if (lo.root.fd >= 0)
 		close(lo.root.fd);
 
+	free(lo.source);
 	return ret ? 1 : 0;
 }

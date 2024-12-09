@@ -1936,12 +1936,11 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 		// readdir passthrough is beneficial when readdirplus is not needed
 		// O_SYNC flag is a hint from samba that readdirplus is not needed
 		// and use readdir passthrough to speed up case insensitive name lookup
-		int passthrough_fh = fuse_passthrough_enable(req, fd);
-		if (passthrough_fh > 0)
-			fi->passthrough_fh = passthrough_fh;
+		int backing_id = fuse_passthrough_open(req, fd);
+		if (backing_id > 0)
+			fi->backing_id = backing_id;
 		else if (fs.debug)
-			cerr << "DEBUG: fuse_passthrough_enable returned: "
-				<< passthrough_fh << endl;
+			cerr << "DEBUG: fuse_passthrough_open failed " << endl;
 	}
 	if (fs.keepcache) {
 		fi->keep_cache = 1;
@@ -2125,12 +2124,11 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	if (fs.rwpassthrough) {
-		int passthrough_fh = fuse_passthrough_enable(req, fh->get_fd());
-		if (passthrough_fh > 0)
-			fi->passthrough_fh = passthrough_fh;
+		int backing_id = fuse_passthrough_open(req, fh->get_fd());
+		if (backing_id > 0)
+			fi->backing_id = backing_id;
 		else if (fs.debug)
-			cerr << "DEBUG: fuse_passthrough_enable returned: "
-				<< passthrough_fh << endl;
+			cerr << "DEBUG: fuse_passthrough_open failed " << endl;
 	}
 
 	fi->fh = reinterpret_cast<uint64_t>(fh);
@@ -2197,12 +2195,11 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 	}
 
 	if (fs.rwpassthrough) {
-		int passthrough_fh = fuse_passthrough_enable(req, fh->get_fd());
-		if (passthrough_fh > 0)
-			fi->passthrough_fh = passthrough_fh;
+		int backing_id = fuse_passthrough_open(req, fh->get_fd());
+		if (backing_id > 0)
+			fi->backing_id = backing_id;
 		else if (fs.debug)
-			cerr << "DEBUG: fuse_passthrough_enable returned: "
-				<< passthrough_fh << endl;
+			cerr << "DEBUG: fuse_passthrough_open failed " << endl;
 	}
 
 	fi->keep_cache = fs.keepcache;

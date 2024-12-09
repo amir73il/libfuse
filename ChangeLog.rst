@@ -1,3 +1,101 @@
+libfuse 3.16.2 (2023-10-10)
+===========================
+
+* Various small fixes and improvements.
+
+libfuse 3.16.1 (2023-08-08)
+===========================
+
+* Readdir kernel cache can be enabled from high-level API.
+
+libfuse 3.15.1 (2023-07-05)
+===========================
+
+Future libfuse releases will be signed with `signify`_ rather than PGP (rationale_). This
+release is the last to be signed with PGP and contains the signify public key for current
+(3.15.X) and upcoming  (3.16.X) minor release cycle.
+
+.. _signify:  https://www.openbsd.org/papers/bsdcan-signify.html
+.. _rationale: https://latacora.micro.blog/2019/07/16/the-pgp-problem.html
+
+
+libfuse 3.15.0 (2023-06-09)
+===========================
+
+* Improved support for some less common systems (32 bit, alternative libcs)
+
+* Unsupported mount options are no longer silently accepted.
+
+* auto_unmount is now compatible with allow_other.
+
+
+libfuse 3.14.1 (2023-03-26)
+===========================
+
+* The extended attribute name passed to the setxattr() handler is no longer
+  truncated at the beginning (bug introduced in 3.13.0).
+  
+* As a result of the above, the additional setattr() flags introduced in 3.14 are no
+  longer available for now. They will hopefully be reintroduced in the next release.
+
+* Further improvements of configuration header handling.
+
+
+libfuse 3.14.0 (2023-02-17)
+===========================
+
+* Properly fix the header installation issue. The fix in 3.13.1 resulted
+  in conflicts with other packages.
+
+* Introduce additional setattr() flags (FORCE, KILL_SUID, KILL_SGID, FILE, KILL_PRIV,
+  OPEN, TIMES_SET)
+
+
+libfuse 3.13.1 (2023-02-03)
+===========================
+
+* Fixed an issue that resulted in errors when attempting to compile against
+  installed libfuse headers (because libc symbol versioning support was not
+  detected correctly in this case).
+
+libfuse 3.13.0 (2023-01-13)
+===========================
+
+* There is a new low-level API function `fuse_session_custom_io` that allows to implement
+  a daemon with a custom io. This can be used to create a daemon that can process incoming
+  FUSE requests to other destinations than `/dev/fuse`.
+
+* A segfault when loading custom FUSE modules has been fixed.
+
+* There is a new `fuse_notify_expire_entry` function.
+
+* A deadlock when resolving paths in the high-level API has been fixed.
+
+* libfuse can now be build explicitly for C libraries without symbol versioning support.
+
+libfuse 3.12.0 (2022-09-08)
+===========================
+
+* There is a new build parameter to specify where the SysV init script should be
+  installed.
+  
+* The *max_idle_threads* parameter has been deprecated in favor of the new max_threads*
+  parameter (which avoids the excessive overhead of creating and destructing threads).
+  Using max_threads == 1 and calling fuse_session_loop_mt() will run single threaded
+  similar to fuse_session_loop().
+
+The following changes apply when using the most recent API (-DFUSE_USE_VERSION=312,
+see `example/passthrough_hp.cc` for an example for how to usse the new API):
+
+* `struct fuse_loop_config` is now private and has to be constructed using
+  *fuse_loop_cfg_create()* and destroyed with *fuse_loop_cfg_destroy()*.  Parameters can be
+  changed using `fuse_loop_cfg_set_*()` functions.
+
+* *fuse_session_loop_mt()* now accepts `struct fuse_loop_config *` as NULL pointer.
+
+* *fuse_parse_cmdline()* now accepts a *max_threads* option.
+
+
 libfuse 3.11.0 (2022-05-02)
 ===========================
 

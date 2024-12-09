@@ -48,6 +48,7 @@ enum fuse_readdir_flags {
 	 * FUSE_FILL_DIR_FLAGS for the filler function.  The filesystem may also
 	 * just ignore this flag completely.
 	 */
+	FUSE_READDIR_DEFAULTS = 0,
 	FUSE_READDIR_PLUS = (1 << 0)
 };
 
@@ -64,6 +65,7 @@ enum fuse_fill_dir_flags {
 	 * It is okay to set FUSE_FILL_DIR_PLUS if FUSE_READDIR_PLUS is not set
 	 * and vice versa.
 	 */
+	FUSE_FILL_DIR_DEFAULTS = 0,
 	FUSE_FILL_DIR_PLUS = (1 << 1)
 };
 
@@ -274,6 +276,20 @@ struct fuse_config {
 	 * fuse_file_info argument is NULL.
 	 */
 	int nullpath_ok;
+	/**
+	 *  Allow parallel direct-io writes to operate on the same file.
+	 *
+	 *  FUSE implementations which do not handle parallel writes on
+	 *  same file/region should NOT enable this option at all as it
+	 *  might lead to data inconsistencies.
+	 *
+	 *  For the FUSE implementations which have their own mechanism
+	 *  of cache/data integrity are beneficiaries of this setting as
+	 *  it now open doors to parallel writes on the same file (without
+	 *  enabling this setting, all direct writes on the same file are
+	 *  serialized, resulting in huge data bandwidth loss).
+	 */
+	int parallel_direct_writes;
 
 	/**
 	 * The remaining options are used by libfuse internally and
@@ -440,7 +456,7 @@ struct fuse_operations {
 	 * If this request is answered with an error code of ENOSYS
 	 * and FUSE_CAP_NO_OPEN_SUPPORT is set in
 	 * `fuse_conn_info.capable`, this is treated as success and
-	 * future calls to open will also succeed without being send
+	 * future calls to open will also succeed without being sent
 	 * to the filesystem process.
 	 *
 	 */
@@ -838,6 +854,22 @@ struct fuse_context {
 	mode_t umask;
 };
 
+#if (defined(LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS))
+/**
+ * The real main function
+ *
+ * Do not call this directly, use fuse_main()
+ */
+int fuse_main_real(int argc, char *argv[], const struct fuse_operations *op,
+		   size_t op_size, struct libfuse_version *version,
+		   void *user_data);
+#else
+int fuse_main_real_317(int argc, char *argv[], const struct fuse_operations *op,
+		   size_t op_size, struct libfuse_version *version, void *user_data);
+#define fuse_main_real(argc, argv, op, op_size, version, user_data) \
+	fuse_main_real_317(argc, argv, op, op_size, version, user_data);
+#endif
+
 /**
  * Main function of FUSE.
  *
@@ -892,12 +924,19 @@ struct fuse_context {
  *
  * Example usage, see hello.c
  */
-/*
-  int fuse_main(int argc, char *argv[], const struct fuse_operations *op,
-  void *private_data);
-*/
-#define fuse_main(argc, argv, op, private_data)				\
-	fuse_main_real(argc, argv, op, sizeof(*(op)), private_data)
+static inline int
+fuse_main(int argc, char *argv[], const struct fuse_operations *op,
+	  void *user_data)
+{
+	struct libfuse_version version = {
+		.major  = FUSE_MAJOR_VERSION,
+		.minor  = FUSE_MINOR_VERSION,
+		.hotfix = FUSE_HOTFIX_VERSION,
+		.padding = 0
+	};
+	return fuse_main_real(argc, argv, op, sizeof(*(op)), &version,
+			      user_data);
+}
 
 /* ----------------------------------------------------------- *
  * More detailed API					       *
@@ -915,6 +954,11 @@ struct fuse_context {
  * @param args the argument vector.
  */
 void fuse_lib_help(struct fuse_args *args);
+
+struct fuse *_fuse_new(struct fuse_args *args,
+		       const struct fuse_operations *op,
+		       size_t op_size, struct libfuse_version *version,
+		       void *user_data);
 
 /**
  * Create a new FUSE filesystem.
@@ -944,12 +988,61 @@ void fuse_lib_help(struct fuse_args *args);
  * @return the created FUSE handle
  */
 #if FUSE_USE_VERSION == 30
-struct fuse *fuse_new_30(struct fuse_args *args, const struct fuse_operations *op,
-			 size_t op_size, void *private_data);
-#define fuse_new(args, op, size, data) fuse_new_30(args, op, size, data)
+struct fuse *_fuse_new_30(struct fuse_args *args,
+			 const struct fuse_operations *op,
+			 size_t op_size, void *user_data);
+static inline struct fuse *
+fuse_new(struct fuse_args *args,
+	 const struct fuse_operations *op, size_t op_size,
+	 void *user_data)
+{
+	struct libfuse_version version = {
+		.major = FUSE_MAJOR_VERSION,
+		.minor = FUSE_MINOR_VERSION,
+		.hotfix = FUSE_HOTFIX_VERSION,
+		.padding = 0
+	};
+
+	return _fuse_new_30(args, op, op_size, &version, user_data);
+}
 #else
-struct fuse *fuse_new(struct fuse_args *args, const struct fuse_operations *op,
-		      size_t op_size, void *private_data);
+#if (defined(LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS))
+static inline struct fuse *
+fuse_new(struct fuse_args *args,
+	 const struct fuse_operations *op, size_t op_size,
+	 void *user_data)
+{
+	struct libfuse_version version = {
+		.major = FUSE_MAJOR_VERSION,
+		.minor = FUSE_MINOR_VERSION,
+		.hotfix = FUSE_HOTFIX_VERSION,
+		.padding = 0
+	};
+
+	return _fuse_new(args, op, op_size, &version, user_data);
+}
+#else /* LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS */
+struct fuse *_fuse_new_317(struct fuse_args *args,
+                      const struct fuse_operations *op, size_t op_size,
+		      struct libfuse_version *version,
+		      void *private_data);
+#define _fuse_new(args, op, size, version, data) \
+	_fuse_new_317(args, op, size, version, data)
+static inline struct fuse *
+fuse_new(struct fuse_args *args,
+	 const struct fuse_operations *op, size_t op_size,
+	 void *user_data)
+{
+	struct libfuse_version version = {
+		.major = FUSE_MAJOR_VERSION,
+		.minor = FUSE_MINOR_VERSION,
+		.hotfix = FUSE_HOTFIX_VERSION,
+		.padding = 0
+	};
+
+	return _fuse_new(args, op, op_size, &version, user_data);
+}
+#endif /* LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS */
 #endif
 
 /**
@@ -1011,6 +1104,9 @@ void fuse_exit(struct fuse *f);
 #if FUSE_USE_VERSION < 32
 int fuse_loop_mt_31(struct fuse *f, int clone_fd);
 #define fuse_loop_mt(f, clone_fd) fuse_loop_mt_31(f, clone_fd)
+#elif FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 12)
+int fuse_loop_mt_32(struct fuse *f, struct fuse_loop_config *config);
+#define fuse_loop_mt(f, config) fuse_loop_mt_32(f, config)
 #else
 /**
  * FUSE event loop with multiple threads
@@ -1038,13 +1134,18 @@ int fuse_loop_mt_31(struct fuse *f, int clone_fd);
  * in the callback function of fuse_operations is also thread-safe.
  *
  * @param f the FUSE handle
- * @param config loop configuration
+ * @param config loop configuration, may be NULL and defaults will be used then
  * @return see fuse_session_loop()
  *
  * See also: fuse_loop()
  */
+#if (defined(LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS))
 int fuse_loop_mt(struct fuse *f, struct fuse_loop_config *config);
+#else
+#define fuse_loop_mt(f, config) fuse_loop_mt_312(f, config)
+#endif /* LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS */
 #endif
+
 
 /**
  * Get the current context
@@ -1095,14 +1196,6 @@ int fuse_interrupted(void);
  *         considered to be an error.
  */
 int fuse_invalidate_path(struct fuse *f, const char *path);
-
-/**
- * The real main function
- *
- * Do not call this directly, use fuse_main()
- */
-int fuse_main_real(int argc, char *argv[], const struct fuse_operations *op,
-		   size_t op_size, void *private_data);
 
 /**
  * Start the cleanup thread when using option "remember".

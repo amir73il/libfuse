@@ -39,6 +39,7 @@ FUSE_3.0 {
 		fuse_session_new;
 		fuse_main_real;
 		fuse_mount;
+		fuse_session_custom_io;
 		fuse_session_mount;
 		fuse_new;
 		fuse_opt_insert_arg;
@@ -82,7 +83,6 @@ FUSE_3.0 {
 		fuse_fs_unlink;
 		fuse_fs_utimens;
 		fuse_fs_write;
-		fuse_register_module;
 		fuse_reply_iov;
 		fuse_version;
 		fuse_pkgversion;
@@ -139,6 +139,7 @@ FUSE_3.1 {
 	        fuse_lib_help;
 		fuse_invalidate_path;
 		fuse_new_30;
+		fuse_new_31;
 		fuse_new;
 } FUSE_3.0;
 
@@ -159,8 +160,6 @@ FUSE_3.3 {
 FUSE_3.4 {
 	global:
 		fuse_fs_copy_file_range;
-		fuse_reply_copy_file_range;
-		fuse_passthrough_enable;
 } FUSE_3.3;
 
 FUSE_3.7 {
@@ -168,6 +167,36 @@ FUSE_3.7 {
 		fuse_set_log_func;
 		fuse_log;
 } FUSE_3.4;
+
+FUSE_3.12 {
+	global:
+		fuse_session_loop_mt;
+		fuse_session_loop_mt_312;
+		fuse_loop_mt;
+		fuse_loop_mt_32;
+		fuse_loop_mt_312;
+		fuse_loop_cfg_create;
+		fuse_loop_cfg_destroy;
+		fuse_loop_cfg_set_idle_threads;
+		fuse_loop_cfg_set_max_threads;
+		fuse_loop_cfg_set_clone_fd;
+		fuse_loop_cfg_convert;
+		fuse_parse_cmdline;
+		fuse_parse_cmdline_30;
+		fuse_parse_cmdline_312;
+		fuse_lowlevel_notify_expire_entry;
+} FUSE_3.4;
+
+FUSE_3.17 {
+	global:
+		_fuse_session_new_317;
+		_fuse_new;
+		_fuse_new_30;
+		_fuse_new_317;
+		fuse_main_real_317;
+		fuse_passthrough_open;
+		fuse_passthrough_close;
+} FUSE_3.12;
 
 # Local Variables:
 # indent-tabs-mode: t

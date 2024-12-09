@@ -6,7 +6,7 @@
   See the file COPYING.
 */
 
-#include "config.h"
+#include "fuse_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +42,10 @@
 #if !defined(SECBIT_NOROOT_LOCKED) && defined(SECURE_NOROOT_LOCKED)
 #define SECBIT_NOROOT_LOCKED (issecure_mask(SECURE_NOROOT_LOCKED))
 #endif
+#endif
+/* linux < 3.5 */
+#ifndef PR_SET_NO_NEW_PRIVS
+#define PR_SET_NO_NEW_PRIVS 38
 #endif
 
 #include "fuse.h"

@@ -8,7 +8,7 @@
   See the file COPYING.LIB.
 */
 
-#include "config.h"
+#include "fuse_config.h"
 #include "fuse_lowlevel.h"
 #include "fuse_misc.h"
 #include "fuse_kernel.h"
@@ -28,6 +28,15 @@
 
 /* Environment var controlling the thread stack size */
 #define ENVNAME_THREAD_STACK "FUSE_THREAD_STACK"
+
+#define FUSE_LOOP_MT_V2_IDENTIFIER	 INT_MAX - 2
+#define FUSE_LOOP_MT_DEF_CLONE_FD	 0
+#define FUSE_LOOP_MT_DEF_MAX_THREADS 10
+#define FUSE_LOOP_MT_DEF_IDLE_THREADS -1 /* thread destruction is disabled
+                                          * by default */
+
+/* an arbitrary large value that cannot be valid */
+#define FUSE_LOOP_MT_MAX_THREADS      (100U * 1000)
 
 struct fuse_worker {
 	struct fuse_worker *prev;
@@ -205,7 +214,10 @@ int fuse_start_thread(pthread_t *thread_id, void *(*func)(void *), void *arg)
 	pthread_attr_t attr;
 	char *stack_size;
 
-	/* Override default stack size */
+	/* Override default stack size
+	 * XXX: This should ideally be a parameter option. It is rather
+	 *      well hidden here.
+	 */
 	pthread_attr_init(&attr);
 	stack_size = getenv(ENVNAME_THREAD_STACK);
 	if (stack_size && pthread_attr_setstacksize(&attr, atoi(stack_size)))
@@ -230,12 +242,11 @@ int fuse_start_thread(pthread_t *thread_id, void *(*func)(void *), void *arg)
 	return 0;
 }
 
-static struct fuse_chan *fuse_clone_chan(struct fuse_mt *mt)
+static int fuse_clone_chan_fd_default(struct fuse_session *se)
 {
 	int res;
 	int clonefd;
 	uint32_t masterfd;
-	struct fuse_chan *newch;
 	const char *devname = "/dev/fuse";
 
 #ifndef O_CLOEXEC
@@ -245,18 +256,40 @@ static struct fuse_chan *fuse_clone_chan(struct fuse_mt *mt)
 	if (clonefd == -1) {
 		fuse_log(FUSE_LOG_ERR, "fuse: failed to open %s: %s\n", devname,
 			strerror(errno));
-		return NULL;
+		return -1;
 	}
+#ifndef O_CLOEXEC
 	fcntl(clonefd, F_SETFD, FD_CLOEXEC);
+#endif
 
-	masterfd = mt->se->fd;
+	masterfd = se->fd;
 	res = ioctl(clonefd, FUSE_DEV_IOC_CLONE, &masterfd);
 	if (res == -1) {
 		fuse_log(FUSE_LOG_ERR, "fuse: failed to clone device fd: %s\n",
 			strerror(errno));
 		close(clonefd);
-		return NULL;
+		return -1;
 	}
+	return clonefd;
+}
+
+static struct fuse_chan *fuse_clone_chan(struct fuse_mt *mt)
+{
+	int clonefd;
+	struct fuse_session *se = mt->se;
+	struct fuse_chan *newch;
+
+	if (se->io != NULL) {
+		if (se->io->clone_fd != NULL)
+			clonefd = se->io->clone_fd(se->fd);
+		else
+			return NULL;
+	} else {
+		clonefd = fuse_clone_chan_fd_default(se);
+	}
+	if (clonefd < 0)
+		return NULL;
+
 	newch = fuse_chan_new(clonefd);
 	if (newch == NULL)
 		close(clonefd);
@@ -312,12 +345,25 @@ static void fuse_join_worker(struct fuse_mt *mt, struct fuse_worker *w)
 	free(w);
 }
 
-FUSE_SYMVER("fuse_session_loop_mt_32", "fuse_session_loop_mt@@FUSE_3.2")
-int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *config)
+int fuse_session_loop_mt_312(struct fuse_session *se, struct fuse_loop_config *config);
+FUSE_SYMVER("fuse_session_loop_mt_312", "fuse_session_loop_mt@@FUSE_3.12")
+int fuse_session_loop_mt_312(struct fuse_session *se, struct fuse_loop_config *config)
 {
-	int err;
+int err;
 	struct fuse_mt mt;
 	struct fuse_worker *w;
+	int created_config = 0;
+
+	if (config) {
+		err = fuse_loop_cfg_verify(config);
+		if (err)
+			return err;
+	} else {
+		/* The caller does not care about parameters - use the default */
+		config = fuse_loop_cfg_create();
+		created_config = 1;
+	}
+
 
 	memset(&mt, 0, sizeof(struct fuse_mt));
 	mt.se = se;
@@ -325,13 +371,8 @@ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *co
 	mt.error = 0;
 	mt.numworker = 0;
 	mt.numavail = 0;
-	if (config->max_idle_threads < -1) {
-		mt.max_threads = -config->max_idle_threads;
-		mt.max_idle = -1;
-	} else {
-		mt.max_idle = config->max_idle_threads;
-		mt.max_threads = INT_MAX;
-	}
+	mt.max_idle = config->max_idle_threads;
+	mt.max_threads = config->max_threads;
 	mt.main.thread_id = pthread_self();
 	mt.main.prev = mt.main.next = &mt.main;
 	sem_init(&mt.finish, 0, 0);
@@ -362,15 +403,112 @@ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *co
 	if(se->error != 0)
 		err = se->error;
 	fuse_session_reset(se);
+
+	if (created_config) {
+		fuse_loop_cfg_destroy(config);
+		config = NULL;
+	}
+
 	return err;
 }
+
+int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config_v1 *config_v1);
+FUSE_SYMVER("fuse_session_loop_mt_32", "fuse_session_loop_mt@FUSE_3.2")
+int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config_v1 *config_v1)
+{
+	int err;
+	struct fuse_loop_config *config = NULL;
+
+	if (config_v1 != NULL) {
+		/* convert the given v1 config */
+		config = fuse_loop_cfg_create();
+		if (config == NULL)
+			return ENOMEM;
+
+		fuse_loop_cfg_convert(config, config_v1);
+	}
+
+	err = fuse_session_loop_mt_312(se, config);
+
+	fuse_loop_cfg_destroy(config);
+
+	return err;
+}
+
 
 int fuse_session_loop_mt_31(struct fuse_session *se, int clone_fd);
 FUSE_SYMVER("fuse_session_loop_mt_31", "fuse_session_loop_mt@FUSE_3.0")
 int fuse_session_loop_mt_31(struct fuse_session *se, int clone_fd)
 {
-	struct fuse_loop_config config;
-	config.clone_fd = clone_fd;
-	config.max_idle_threads = 10;
-	return fuse_session_loop_mt_32(se, &config);
+	int err;
+	struct fuse_loop_config *config = fuse_loop_cfg_create();
+	if (clone_fd > 0)
+		 fuse_loop_cfg_set_clone_fd(config, clone_fd);
+	err = fuse_session_loop_mt_312(se, config);
+
+	fuse_loop_cfg_destroy(config);
+
+	return err;
 }
+
+struct fuse_loop_config *fuse_loop_cfg_create(void)
+{
+	struct fuse_loop_config *config = calloc(1, sizeof(*config));
+	if (config == NULL)
+		return NULL;
+
+	config->version_id       = FUSE_LOOP_MT_V2_IDENTIFIER;
+	config->max_idle_threads = FUSE_LOOP_MT_DEF_IDLE_THREADS;
+	config->max_threads      = FUSE_LOOP_MT_DEF_MAX_THREADS;
+	config->clone_fd         = FUSE_LOOP_MT_DEF_CLONE_FD;
+
+	return config;
+}
+
+void fuse_loop_cfg_destroy(struct fuse_loop_config *config)
+{
+	free(config);
+}
+
+int fuse_loop_cfg_verify(struct fuse_loop_config *config)
+{
+	if (config->version_id != FUSE_LOOP_MT_V2_IDENTIFIER)
+		return -EINVAL;
+
+	return 0;
+}
+
+void fuse_loop_cfg_convert(struct fuse_loop_config *config,
+			   struct fuse_loop_config_v1 *v1_conf)
+{
+	fuse_loop_cfg_set_idle_threads(config, v1_conf->max_idle_threads);
+
+	fuse_loop_cfg_set_clone_fd(config, v1_conf->clone_fd);
+}
+
+void fuse_loop_cfg_set_idle_threads(struct fuse_loop_config *config,
+				    unsigned int value)
+{
+	if (value > FUSE_LOOP_MT_MAX_THREADS) {
+		if (value != UINT_MAX)
+			fuse_log(FUSE_LOG_ERR,
+				 "Ignoring invalid max threads value "
+				 "%u > max (%u).\n", value,
+				 FUSE_LOOP_MT_MAX_THREADS);
+		return;
+	}
+	config->max_idle_threads = value;
+}
+
+void fuse_loop_cfg_set_max_threads(struct fuse_loop_config *config,
+				   unsigned int value)
+{
+	config->max_threads = value;
+}
+
+void fuse_loop_cfg_set_clone_fd(struct fuse_loop_config *config,
+				unsigned int value)
+{
+	config->clone_fd = value;
+}
+

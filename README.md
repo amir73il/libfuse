@@ -49,21 +49,34 @@ Supported Platforms
 Installation
 ------------
 
-You can download libfuse from
-https://github.com/libfuse/libfuse/releases. To build and install, you
-must use [Meson](http://mesonbuild.com/) and
-[Ninja](https://ninja-build.org).  After extracting the libfuse
-tarball, create a (temporary) build directory and run Meson:
+You can download libfuse from https://github.com/libfuse/libfuse/releases. To build and
+install, you must use [Meson](http://mesonbuild.com/) and
+[Ninja](https://ninja-build.org).  After downloading the tarball and `.sig` file, verify
+it using [signify](https://www.openbsd.org/papers/bsdcan-signify.html):
 
+    signify -V -m fuse-X.Y.Z.tar.gz -p fuse-X.Y.pub
+    
+The `fuse-X.Y.pub` file contains the signing key and needs to be obtained from a
+trustworthy source. Each libfuse release contains the signing key for the release after it
+in the `signify` directory, so you only need to manually acquire this file once when you
+install libfuse for the first time.
+
+After you have validated the tarball, extract it, create a (temporary) build directory and
+run Meson:
+
+    $ tar xzf fuse-X.Y.Z.tar.gz; cd fuse-X.Y.Z
     $ mkdir build; cd build
-    $ meson ..
+    $ meson setup ..
 
 Normally, the default build options will work fine. If you
 nevertheless want to adjust them, you can do so with the
 *meson configure* command:
 
     $ meson configure # list options
-    $ meson configure -D disable-mtab=true # set an option
+    $ meson configure -D disable-mtab=true # set an optionq
+
+    $ # ensure all meson options are applied to the final build system
+    $ meson setup --reconfigure ../
 
 To build, test, and install libfuse, you then use Ninja:
 
