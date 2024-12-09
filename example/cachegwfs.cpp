@@ -131,13 +131,20 @@ struct Redirect {
 	vector<string> readdir_xattr;
 	vector<string> writedir_xattr;
 	vector<string> xattr_prefixes;
-	set<enum op> ops; // fs operations to redirect
+	unordered_set<enum op> ops; // fs operations to redirect
+	unordered_set<uint64_t> folder_ids; // folder ids to redirect
 
 	bool test_op(enum op op) {
 		return ops.count(op) > 0;
 	}
 	void set_op(enum op op) {
 		ops.insert(op);
+	}
+	bool test_folder_id(uint64_t folder_id) {
+		return folder_ids.count(folder_id) > 0;
+	}
+	void set_folder_id(uint64_t folder_id) {
+		folder_ids.insert(folder_id);
 	}
 
 	void set_op(const string &name) {
@@ -149,6 +156,13 @@ struct Redirect {
 			set_op(it->first);
 		else
 			cerr << "WARNING: unknown redirect operation " << name << endl;
+	}
+	void set_folder_id(const string &name) {
+		uint64_t folder_id = strtoull(name.c_str(), NULL, 10);
+		if (folder_id)
+			folder_ids.insert(folder_id);
+		else
+			cerr << "WARNING: illegal redirect folder id " << name << endl;
 	}
 };
 
@@ -311,16 +325,30 @@ static uint64_t *get_folder_id(const fuse_state_t &state)
 	return (uint64_t *)state.get();
 }
 
-static enum op redirect_open_op(fuse_file_info *fi)
+static bool should_redirect_folder_id(const fuse_path_at &at)
+{
+	auto r = fs.redirect();
+	fuse_state_t& state = at.inode().get_state(fs);
+
+	if (state && r->test_folder_id(*get_folder_id(state)))
+		return true;
+
+	return false;
+}
+
+static enum op redirect_open_op(const fuse_path_at &at, fuse_file_info *fi)
 {
 	enum op op;
 
 	if (fi->flags & O_CREAT)
 		op = OP_CREATE;
 	else if ((fi->flags & O_ACCMODE) == O_RDONLY)
-		op = OP_OPEN_RO;
+		return OP_OPEN_RO;
 	else
 		op = OP_OPEN_RW;
+
+	if (should_redirect_folder_id(at))
+		return OP_REDIRECT;
 
 	return op;
 }
@@ -607,7 +635,7 @@ static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 
 static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 {
-	enum op op = redirect_open_op(fi);
+	enum op op = redirect_open_op(in, fi);
 	auto out = get_fd_path_op(in, op);
 	// Do not passthrough to redirected fd
 	if (out.cwd())
@@ -622,7 +650,7 @@ static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 
 static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 {
-	enum op op = redirect_open_op(fi);
+	enum op op = redirect_open_op(in, fi);
 	auto out = get_fd_path_op(in, op);
 	// Do not passthrough to redirected fd
 	if (out.cwd())
@@ -944,6 +972,8 @@ static Redirect *read_config_file()
 			redirect->write_xattr.push_back(value);
 		} else if (name == "redirect_writedir_xattr") {
 			redirect->writedir_xattr.push_back(value);
+		} else if (name == "redirect_write_folder_id") {
+			redirect->set_folder_id(value);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
 		} else if (name == "redirect_op") {
