@@ -212,6 +212,12 @@ struct fuse_empty_path_at : fuse_path_at {
 	fuse_empty_path_at(fuse_req_t req, fuse_inode &inode);
 };
 
+/* String the name from dirfd+name */
+struct fuse_parent_path_at : fuse_path_at {
+	fuse_parent_path_at(const fuse_path_at &at) :
+		fuse_path_at(at.req(), at.inode(), "") {}
+};
+
 /* Path to be used for syscalls that do not take dirfd or empty path */
 struct fuse_path_at_cwd : fuse_path_at {
 	fuse_path_at_cwd(const fuse_path_at &at) :
