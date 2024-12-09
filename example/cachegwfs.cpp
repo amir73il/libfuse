@@ -130,6 +130,7 @@ struct Redirect {
 	vector<string> write_xattr;
 	vector<string> readdir_xattr;
 	vector<string> writedir_xattr;
+	vector<string> folder_id_xattr;
 	vector<string> xattr_prefixes;
 	unordered_set<enum op> ops; // fs operations to redirect
 	unordered_set<uint64_t> folder_ids; // folder ids to redirect
@@ -325,6 +326,23 @@ static uint64_t *get_folder_id(const fuse_state_t &state)
 	return (uint64_t *)state.get();
 }
 
+static bool should_redirect_folder_id_xattr(const fuse_path_at &at, const string &xattr)
+{
+	uint64_t folder_id = 0;
+
+	auto ret = getxattr(at.path(), xattr.c_str(), &folder_id, sizeof(folder_id));
+        if (ret == -1) {
+		if (fs.debug() && errno != ENODATA && errno != ENOENT)
+			cerr << "DEBUG: failed to get folder id from xattr '" << xattr
+				<< "' at " << at.path() << ", errno=" << errno << endl;
+		return false;
+	}
+
+	// existing xattr and zero folder_id means redirect all folder ids
+	auto r = fs.redirect();
+	return !folder_id || r->test_folder_id(folder_id);
+}
+
 static bool should_redirect_folder_id(const fuse_path_at &at)
 {
 	auto r = fs.redirect();
@@ -332,6 +350,18 @@ static bool should_redirect_folder_id(const fuse_path_at &at)
 
 	if (state && r->test_folder_id(*get_folder_id(state)))
 		return true;
+
+	if (r->folder_id_xattr.empty())
+		return false;
+
+	// query the folder id xattr on the redirected parent directory path
+	// because the file path itself does not yet exist before create()
+	fuse_parent_path_at parent(at);
+	auto out = get_fd_path_op(parent, OP_REDIRECT);
+	for (const auto& xattr : r->folder_id_xattr) {
+		if (should_redirect_folder_id_xattr(out, xattr))
+			return true;
+	}
 
 	return false;
 }
@@ -972,6 +1002,8 @@ static Redirect *read_config_file()
 			redirect->write_xattr.push_back(value);
 		} else if (name == "redirect_writedir_xattr") {
 			redirect->writedir_xattr.push_back(value);
+		} else if (name == "redirect_folder_id_xattr") {
+			redirect->folder_id_xattr.push_back(value);
 		} else if (name == "redirect_write_folder_id") {
 			redirect->set_folder_id(value);
 		} else if (name == "redirect_xattr_prefix") {
