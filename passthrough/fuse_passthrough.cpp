@@ -1902,13 +1902,16 @@ static void assign_operations(fuse_passthrough_operations &oper,
 	oper.copy_file_range = in.copy_file_range ?: def.copy_file_range;
 }
 
-static void assign_module_operations(fuse_passthrough_module &module)
+static void assign_module_operations(fuse_passthrough_module &module,
+				     fuse_passthrough_module &head)
 {
-	// Initialize module next operations to default fs operations
-	assign_default_operations(module.next);
-	// Initialize fs next operations to either operations of
-	// the new module or to the default fs operations
-	assign_operations(fs.next, module.oper, fs.oper);
+	// Initialize module next operations to either the operations of the
+	// head module or the head module's next operations
+	assign_operations(module.next, head.oper, head.next);
+	// Initialize fs next operations to either operations of the new
+	// module or leave the current fs next operations
+	assign_operations(fs.next, module.oper, fs.next);
+	module.idx = head.idx + 1;
 }
 
 static void maximize_fd_limit()
@@ -1927,7 +1930,8 @@ static void maximize_fd_limit()
 
 
 int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
-			  fuse_passthrough_module *module, size_t oper_size)
+			  fuse_passthrough_module *modules[], int num_modules,
+			  size_t oper_size)
 {
 	struct fuse_loop_config *loop_config = NULL;
 
@@ -1945,11 +1949,14 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 
 	// Assign default operations to default fs
 	assign_default_operations(fs.oper);
-	// Chain module operations before default fs operations
-	if (module)
-		assign_module_operations(*module);
-	else
-		assign_default_operations(fs.next);
+	assign_default_operations(fs.next);
+	// Chain module operations terminating with default fs operations
+	fuse_passthrough_module *head = &fs;
+	while (num_modules-- > 0) {
+		assign_module_operations(**modules, *head);
+		head = *modules;
+		modules++;
+	}
 
 	// Initialize fuse
 	auto ret = -1;
