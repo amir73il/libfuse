@@ -322,7 +322,8 @@ struct fuse_passthrough_module {
 #define call_module_next_op(module, op) \
 	__call_op((module).next.op)
 
-int fuse_passthrough_main(fuse_args *args, fuse_passthrough_module *module,
+int fuse_passthrough_main(fuse_args *args,
+			  fuse_passthrough_module *modules[], int num_modules,
 			  size_t oper_size);
 
 #endif /* FUSE_PASSTHROUGH_H_ */
