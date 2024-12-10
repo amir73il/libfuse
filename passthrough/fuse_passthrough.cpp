@@ -886,7 +886,8 @@ static void fuse_reply_errno(fuse_req_t req, int res)
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
-static bool do_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
+static bool do_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
+				bool is_dir = false)
 {
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
@@ -896,10 +897,16 @@ static bool do_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *
 	if (!fs.opts.kernel_passthrough)
 		return false;
 
-	// If kernel passthrough is enabled, but not for this fd, use dio,
-	// because another open fd of this inode may have already put the
-	// inode in passthrough io mode.
-	if (!fi->passthrough_read || !fi->passthrough_write) {
+	// If kernel passthrough is enabled, but not for a specific non-dir fd,
+	// use dio, because another open fd of this inode may have already put
+	// the inode in passthrough io mode.
+	// kernel readdir passthrough is not yet supported by upstream kernel
+	// so it is disabled by default.  When enabled, it will disable both
+	// readdir cache and readdirplus.
+	if (is_dir) {
+		if (!fs.opts.readdir_passthrough || !fi->passthrough_readdir)
+			return false;
+	} else if (!fi->passthrough_read || !fi->passthrough_write) {
 		fi->direct_io = 1;
 		return false;
 	}
@@ -925,8 +932,11 @@ static bool do_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *
 
 	// Do not clean cache on open of kernel passthrough fd and
 	// do not call flush on close of kernel passthrough fd
+	// readdir passthrough does not use readdir cache
 	fi->keep_cache = true;
 	fi->noflush = true;
+	if (is_dir)
+		fi->cache_readdir = false;
 	return true;
 }
 
@@ -1773,6 +1783,7 @@ static void pfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		fi->keep_cache = 1;
 		fi->cache_readdir = 1;
 	}
+	do_passthrough_open(req, ino, fi, true);
 	fuse_reply_open(req, fi);
 	return;
 }

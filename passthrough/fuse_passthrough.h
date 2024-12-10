@@ -41,6 +41,7 @@ struct fuse_passthrough_opts {
 	unsigned int max_threads{0};
 	unsigned int max_idle_threads{0};
 	bool kernel_passthrough{true};
+	bool readdir_passthrough{false};
 };
 
 struct fuse_passthrough_module;
