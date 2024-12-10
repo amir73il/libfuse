@@ -18,6 +18,7 @@
  */
 
 #include <string>
+#include <memory>
 
 #include <fuse.h>
 #include <fuse_lowlevel.h>
@@ -39,8 +40,17 @@ struct fuse_passthrough_opts {
 	unsigned int max_idle_threads{0};
 };
 
+struct fuse_passthrough_module;
+struct fuse_inode;
+
+typedef std::shared_ptr<void> fuse_state_t;
+typedef bool (*fuse_fill_state_t)(const fuse_inode &inode,
+				  fuse_state_t &state, void *data);
+
 struct fuse_inode {
 	virtual int get_fd() const = 0;
+	virtual fuse_state_t& get_state(const fuse_passthrough_module &module) = 0;
+
 	virtual bool is_dir() const = 0;
 	virtual bool is_regular() const = 0;
 	virtual bool is_symlink() const = 0;
@@ -50,6 +60,27 @@ struct fuse_inode {
 
 	virtual ~fuse_inode() {};
 };
+
+/*
+ * Store/fetch a generic state object per module per inode.
+ *
+ * The module is responsible of allocating the object referenced
+ * by the shared_ptr, but the object is desctructed automatically.
+ *
+ * The optional @filler callback can be used to initialize
+ * a new state object or to update an existing state object.
+ * Note that @filler is called with inode mutex held, so it
+ * should not call back into default passthrough methods.
+ */
+bool get_module_inode_state(const fuse_passthrough_module &module,
+			    fuse_ino_t ino, fuse_state_t &ret_state,
+			    fuse_fill_state_t filler = NULL,
+			    void *data = NULL);
+bool set_module_inode_state(const fuse_passthrough_module &module,
+			    fuse_ino_t ino, const fuse_state_t &new_state,
+			    bool excl = false);
+bool clear_module_inode_state(const fuse_passthrough_module &module,
+			      fuse_ino_t ino);
 
 struct fuse_path_at {
 	/*
