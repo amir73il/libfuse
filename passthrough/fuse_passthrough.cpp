@@ -99,14 +99,16 @@ struct Inode {
 	int _ftype {ftype_unknown};
 	ino_t src_ino {0};
 	atomic<uint64_t> nlookup {0};
+	// Allow each module to store/fetch state in inode
+	fuse_module_states module_states;
 	mutex m;
 
 	ino_t ino() { return src_ino; }
 	bool dead() { return !src_ino; }
 
+	Inode(int num_modules) : module_states(num_modules) {}
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
-	Inode() = default;
 	Inode(const Inode&) = delete;
 	Inode(Inode&& inode) = delete;
 	Inode& operator=(Inode&& inode) = delete;
@@ -148,13 +150,14 @@ struct Fs : public fuse_passthrough_module {
 	uid_t uid;
 	gid_t gid;
 	dev_t src_dev;
+	int num_modules;
 
 	Fs() : fuse_passthrough_module("default") {
 		// Get own credentials
 		uid = geteuid();
 		gid = getegid();
 		// Initialize a dead inode
-		inodes[0].reset(new Inode());
+		inodes[0].reset(new Inode(0));
 	}
 
 	void init_root();
@@ -233,7 +236,7 @@ void __trace_fd_path_at(const fuse_path_at &at, const char *caller)
 
 void Fs::init_root()
 {
-	root.reset(new Inode());
+	root.reset(new Inode(num_modules));
 	root->nlookup = 9999;
 
 	struct stat stat;
@@ -281,7 +284,8 @@ struct InodeRef : fuse_inode {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(InodePtr inode, bool openfd = true) : i(inode)
+	InodeRef(InodePtr inode, bool openfd = true) :
+		fuse_inode(inode->module_states), i(inode)
 	{
 		if (i->dead())
 			return;
@@ -331,6 +335,64 @@ static InodePtr get_inode(fuse_ino_t ino)
 		return fs.inodes[0];
 	}
 	return iter->second;
+}
+
+
+optional<fuse_state_t> fuse_states::get_state(const fuse_passthrough_module &m)
+{
+	try {
+		return {states.at(m.idx - 1)};
+	} catch (const out_of_range& e) {
+		return {};
+	}
+}
+
+bool fuse_states::set_state(const fuse_passthrough_module &m,
+			    const fuse_state_t &new_state)
+{
+	try {
+		states.at(m.idx - 1) = new_state;
+		return true;
+	} catch (const out_of_range& e) {
+		return false;
+	}
+}
+
+bool get_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, fuse_state_t &ret_state,
+			    fuse_fill_state_t filler, void *data)
+{
+	// Get a reference to inode with O_PATH fd to be used by filler
+	InodeRef inode(get_inode(ino), !!filler);
+	if (inode.is_dead())
+		return false;
+
+	lock_guard<mutex> g {inode.i->m};
+	auto ret = inode.get_state(m);
+	if (!ret)
+		return false;
+
+	auto state = ret.value();
+	// @filler returns true if state was initialized or updated
+	if (filler && filler(inode, state, data)) {
+		ret = inode.set_state(m, state);
+		if (!ret)
+			return false;
+	}
+
+	ret_state = state;
+	return true;
+}
+
+bool set_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, const fuse_state_t &new_state)
+{
+	InodeRef inode(get_inode(ino), false);
+	if (inode.is_dead())
+		return false;
+
+	lock_guard<mutex> g {inode.i->m};
+	return inode.set_state(m, new_state);
 }
 
 
@@ -575,7 +637,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	if (found) {
 		inode_ptr = iter->second;
 	} else try {
-		fs.inodes[e->ino].reset(new Inode());
+		fs.inodes[e->ino].reset(new Inode(fs.num_modules));
 		inode_ptr = fs.inodes[e->ino];
 	} catch (bad_alloc&) {
 		return ENOMEM;
@@ -639,7 +701,7 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 			<< ", parent=" << parent << endl;
 
 	if (strcmp(name, ".") == 0) {
-		auto i = new (nothrow) Inode();
+		auto i = new (nothrow) Inode(fs.num_modules);
 		if (!i) {
 			fuse_reply_err(req, ENOMEM);
 			return;
@@ -2019,6 +2081,7 @@ int fuse_passthrough_main(fuse_args *args,
 	maximize_fd_limit();
 
 	// Initialize filesystem root
+	fs.num_modules = num_modules;
 	fs.init_root();
 
 	if (oper_size != sizeof(fs.oper))
