@@ -192,14 +192,15 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
+@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs'))
 @pytest.mark.parametrize("mode", ('', 'debug', 'wbcache', 'nocache'))
-def test_passthrough_hp(short_tmpdir, mode, output_checker):
+def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
     cache = (mode != 'nocache')
 
     cmdline = base_cmdline + \
-              [ pjoin(basename, 'example', 'passthrough_hp'),
+              [ pjoin(basename, 'example', name),
                 src_dir, mnt_dir ]
 
     cmdline.append('--foreground')
