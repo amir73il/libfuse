@@ -140,7 +140,9 @@ int main(int argc, char *argv[]) {
 
 	// If we are not printing any traces, let the passthrough library take care
 	// of everything
-	auto mod = (opts.debug ? trace_module() : NULL);
+	int num_modules = opts.debug;
+	fuse_passthrough_module *modules[] = { trace_module() };
 
-	return fuse_passthrough_main(&args, opts, mod, sizeof(fuse_passthrough_operations));
+	return fuse_passthrough_main(&args, opts, modules, num_modules,
+				     sizeof(fuse_passthrough_operations));
 }

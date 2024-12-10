@@ -313,6 +313,7 @@ struct fuse_passthrough_module {
 	__call_op((module).next.op)
 
 int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
-			  fuse_passthrough_module *module, size_t oper_size);
+			  fuse_passthrough_module *modules[], int num_modules,
+			  size_t oper_size);
 
 #endif /* FUSE_PASSTHROUGH_H_ */
