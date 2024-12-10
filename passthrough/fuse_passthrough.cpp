@@ -98,13 +98,16 @@ struct Inode {
 	int _ftype {ftype_unknown};
 	ino_t src_ino {0};
 	uint64_t nlookup {0};
+	// Allow each module to store/fetch state in inode
+	fuse_module_states module_states;
 	mutex m;
 
+	ino_t ino() { return src_ino; }
 	bool dead() { return !src_ino; }
 
+	Inode(int num_modules) : module_states(num_modules) {}
 	// Delete copy constructor and assignments. We could implement
 	// move if we need it.
-	Inode() = default;
 	Inode(const Inode&) = delete;
 	Inode(Inode&& inode) = delete;
 	Inode& operator=(Inode&& inode) = delete;
@@ -145,13 +148,14 @@ struct Fs : public fuse_passthrough_module {
 	uid_t uid;
 	gid_t gid;
 	dev_t src_dev;
+	int num_modules;
 
 	Fs() : fuse_passthrough_module("default") {
 		// Get own credentials
 		uid = geteuid();
 		gid = getegid();
 		// Initialize a dead inode
-		inodes[0].reset(new Inode());
+		inodes[0].reset(new Inode(0));
 	}
 
 	void init_root();
@@ -230,7 +234,7 @@ void __trace_fd_path_at(const fuse_path_at &at, const char *caller)
 
 void Fs::init_root()
 {
-	root.reset(new Inode());
+	root.reset(new Inode(num_modules));
 	root->nlookup = 9999;
 
 	struct stat stat;
@@ -253,6 +257,8 @@ struct InodeRef : fuse_inode {
 	InodePtr i;
 
 	int get_fd() const override { return fd; }
+
+	ino_t ino() const override { return i->ino(); }
 	bool is_dir() const override {
 		return i->_ftype == ftype_dir;
 	}
@@ -276,12 +282,13 @@ struct InodeRef : fuse_inode {
 	InodeRef& operator=(InodeRef&& inode) = delete;
 	InodeRef& operator=(const InodeRef&) = delete;
 
-	InodeRef(InodePtr inode) : i(inode)
+	InodeRef(InodePtr inode, bool openfd = true) :
+		fuse_inode(inode->module_states), i(inode)
 	{
 		if (i->dead())
 			return;
 
-		fd = i->_fd;
+		fd = openfd ? i->_fd : 0;
 		if (fd == -1) {
 			fd = -errno;
 			cerr << "INFO: failed to open fd for inode "
@@ -323,6 +330,64 @@ static InodePtr get_inode(fuse_ino_t ino)
 		return fs.inodes[0];
 	}
 	return iter->second;
+}
+
+
+optional<fuse_state_t> fuse_states::get_state(const fuse_passthrough_module &m)
+{
+	try {
+		return {states.at(m.idx - 1)};
+	} catch (const out_of_range& e) {
+		return {};
+	}
+}
+
+bool fuse_states::set_state(const fuse_passthrough_module &m,
+			    const fuse_state_t &new_state)
+{
+	try {
+		states.at(m.idx - 1) = new_state;
+		return true;
+	} catch (const out_of_range& e) {
+		return false;
+	}
+}
+
+bool get_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, fuse_state_t &ret_state,
+			    fuse_fill_state_t filler, void *data)
+{
+	// Get a reference to inode with O_PATH fd to be used by filler
+	InodeRef inode(get_inode(ino), !!filler);
+	if (inode.is_dead())
+		return false;
+
+	lock_guard<mutex> g {inode.i->m};
+	auto ret = inode.get_state(m);
+	if (!ret)
+		return false;
+
+	auto state = ret.value();
+	// @filler returns true if state was initialized or updated
+	if (filler && filler(inode, state, data)) {
+		ret = inode.set_state(m, state);
+		if (!ret)
+			return false;
+	}
+
+	ret_state = state;
+	return true;
+}
+
+bool set_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, const fuse_state_t &new_state)
+{
+	InodeRef inode(get_inode(ino), false);
+	if (inode.is_dead())
+		return false;
+
+	lock_guard<mutex> g {inode.i->m};
+	return inode.set_state(m, new_state);
 }
 
 
@@ -575,7 +640,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	if (found) {
 		inode_ptr = iter->second;
 	} else try {
-		fs.inodes[e->ino].reset(new Inode());
+		fs.inodes[e->ino].reset(new Inode(fs.num_modules));
 		inode_ptr = fs.inodes[e->ino];
 	} catch (bad_alloc&) {
 		return ENOMEM;
@@ -637,7 +702,7 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 			<< ", parent=" << parent << endl;
 
 	if (strcmp(name, ".") == 0) {
-		auto i = new (nothrow) Inode();
+		auto i = new (nothrow) Inode(fs.num_modules);
 		if (!i) {
 			fuse_reply_err(req, ENOMEM);
 			return;
@@ -945,12 +1010,35 @@ static void pfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
 	fuse_reply_errno(req, res);
 }
 
-static void forget_one(fuse_ino_t ino, uint64_t n)
+// Called with inode mutex held!
+static int do_forget(const fuse_path_at &at)
+{
+	fuse_ino_t ino = at.inode().ino();
+	auto inode_ptr = get_inode(ino);
+	Inode &inode = *inode_ptr;
+
+	int ninodes;
+	{
+		lock_guard<mutex> g_fs {fs.m};
+		// Mark dead inode to protect against racing with lookup
+		inode.src_ino = 0;
+		fs.inodes.erase(ino);
+		ninodes = fs.inodes.size();
+	}
+
+	if (fs.debug())
+		cerr << "DEBUG: forget: cleaning up inode " << ino
+			<< " inode count is " << ninodes << endl;
+
+	return 0;
+}
+
+static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 {
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
-	lock_guard<mutex> g {inode.m};
 
+	lock_guard<mutex> g {inode.m};
 	if (inode.dead())
 		return;
 
@@ -962,18 +1050,10 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 	}
 	inode.nlookup -= n;
 	if (!inode.nlookup) {
-		auto src_ino = inode.src_ino;
-		int ninodes;
-		{
-			lock_guard<mutex> g_fs {fs.m};
-			// Mark dead inode to protect against racing with lookup
-			inode.src_ino = 0;
-			fs.inodes.erase(ino);
-			ninodes = fs.inodes.size();
-		}
-		if (fs.debug())
-			cerr << "DEBUG: forget: cleaning up inode " << src_ino
-				<< " inode count is " << ninodes << endl;
+		InodeRef inode_ref(inode_ptr);
+		fuse_path_at at(req, inode_ref, "");
+		call_op(forget)(at);
+		// Careful! inode object is dead after the forget call
 	} else if (fs.debug()) {
 		cerr << "DEBUG: forget: inode " << inode.src_ino
 			<< " lookup count now " << inode.nlookup << endl;
@@ -982,7 +1062,7 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 
 static void pfs_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
 {
-	forget_one(ino, nlookup);
+	forget_one(req, ino, nlookup);
 	fuse_reply_none(req);
 }
 
@@ -990,7 +1070,7 @@ static void pfs_forget_multi(fuse_req_t req, size_t count,
 			     fuse_forget_data *forgets)
 {
 	for (unsigned i = 0; i < count; i++)
-		forget_one(forgets[i].ino, forgets[i].nlookup);
+		forget_one(req, forgets[i].ino, forgets[i].nlookup);
 	fuse_reply_none(req);
 }
 
@@ -1135,7 +1215,7 @@ static int fill_dir(void *_buf, const char *name, const struct stat *attr,
 		if (fs.debug())
 			cerr << "DEBUG: readdir(): buffer full, returning data. " << endl;
 		if (e.ino)
-			forget_one(e.ino, 1);
+			forget_one(buf->at.req(), e.ino, 1);
 		return 0;
 	}
 
@@ -1815,6 +1895,7 @@ static void pfs_copy_file_range(fuse_req_t req, fuse_ino_t ino_in, off_t off_in,
 static void assign_default_operations(fuse_passthrough_operations &oper)
 {
 	oper.lookup = do_lookup;
+	oper.forget = do_forget;
 	oper.mkdir = do_mkdir;
 	oper.mknod = do_mknod;
 	oper.symlink = do_symlink;
@@ -1903,6 +1984,7 @@ static void assign_operations(fuse_passthrough_operations &oper,
 			      const fuse_passthrough_operations &def)
 {
 	oper.lookup = in.lookup ?: def.lookup;
+	oper.forget = in.forget ?: def.forget;
 	oper.mkdir = in.mkdir ?: def.mkdir;
 	oper.mknod = in.mknod ?: def.mknod;
 	oper.symlink = in.symlink ?: def.symlink;
@@ -1977,6 +2059,7 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 	maximize_fd_limit();
 
 	// Initialize filesystem root
+	fs.num_modules = num_modules;
 	fs.opts = opts;
 	fs.init_root();
 

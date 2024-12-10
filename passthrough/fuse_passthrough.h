@@ -18,6 +18,9 @@
  */
 
 #include <string>
+#include <memory>
+#include <optional>
+#include <functional>
 
 #include <fuse.h>
 #include <fuse_lowlevel.h>
@@ -39,8 +42,30 @@ struct fuse_passthrough_opts {
 	unsigned int max_idle_threads{0};
 };
 
-struct fuse_inode {
+struct fuse_passthrough_module;
+struct fuse_inode;
+
+using fuse_state_t = uint64_t;
+using fuse_module_states = std::vector<fuse_state_t>;
+using fuse_fill_state_t =
+	std::function<bool(const fuse_inode &, fuse_state_t &, void *)>;
+
+struct fuse_states {
+	fuse_states(fuse_module_states &s) : states(s) {}
+	virtual ~fuse_states() {};
+
+	std::optional<fuse_state_t> get_state(
+			const fuse_passthrough_module &m);
+	bool set_state(const fuse_passthrough_module &m,
+		       const fuse_state_t &new_state);
+
+	fuse_module_states &states;
+};
+
+struct fuse_inode : fuse_states {
 	virtual int get_fd() const = 0;
+	virtual ino_t ino() const = 0;
+
 	virtual bool is_dir() const = 0;
 	virtual bool is_regular() const = 0;
 	virtual bool is_symlink() const = 0;
@@ -48,8 +73,28 @@ struct fuse_inode {
 	virtual bool is_dead() const = 0;
 	virtual bool is_root() const = 0;
 
+	fuse_inode(fuse_module_states &s) : fuse_states(s) {}
 	virtual ~fuse_inode() {};
 };
+
+/*
+ * Store/fetch a generic state object per module per inode.
+ *
+ * If the module storing a pointer to an allocated state object, then the
+ * module must implement the forget() method to free the state object.
+ *
+ * The optional @filler callback can be used to initialize a new state
+ * object or to update an existing state object.
+ * @filler returns true if the state was initialized or updated.
+ * Note that @filler is called with inode mutex held, so it should not
+ * call back into default passthrough methods.
+ */
+bool get_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, fuse_state_t &ret_state,
+			    fuse_fill_state_t filler = NULL,
+			    void *data = NULL);
+bool set_module_inode_state(const fuse_passthrough_module &m,
+			    fuse_ino_t ino, const fuse_state_t &new_state);
 
 struct fuse_path_at {
 	/*
@@ -218,6 +263,12 @@ struct fuse_passthrough_operations {
 	 * the file is source directory before the actual passthrough lookup.
 	 */
 	int (*lookup) (const fuse_path_at &, fuse_entry_param *);
+	/*
+	 * forget() operation should be implemented by modules to destruct
+	 * inode state objects. It is called before freeing inode with the
+	 * inode mutex held.
+	 */
+	int (*forget) (const fuse_path_at &);
 	int (*getattr) (const fuse_path_at &, struct stat *,
 			struct fuse_file_info *);
 	int (*chmod) (const fuse_path_at &, mode_t, struct fuse_file_info *);
