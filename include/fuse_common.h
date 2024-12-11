@@ -96,8 +96,13 @@ struct fuse_file_info {
 	    file */
 	uint32_t parallel_direct_writes : 1;
 
+	/** Can be filled in by open, to indicate that I/O on the file
+	    can be performed by the library (or kernel). */
+	uint32_t passthrough_read : 1;
+	uint32_t passthrough_write : 1;
+
 	/** Padding.  Reserved for future use*/
-	uint32_t padding : 23;
+	uint32_t padding : 21;
 	uint32_t padding2 : 32;
 	uint32_t padding3 : 32;
 

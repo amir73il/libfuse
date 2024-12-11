@@ -171,6 +171,9 @@ void __trace_fd_path_at(const fuse_path_at &in, const char *caller);
 struct fuse_file {
 	virtual int get_fd() = 0;
 	virtual ~fuse_file() {}
+
+	bool passthrough_read {false};
+	bool passthrough_write {false};
 };
 
 static inline fuse_file *get_file(fuse_file_info *fi)
