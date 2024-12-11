@@ -304,6 +304,8 @@ struct Inode {
 	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	int _ftype {ftype_unknown};
 	xfs_fh src_fh {0};
+	int backing_id {0};
+	uint64_t nopen {0};
 	uint64_t nlookup {0};
 	// Allow each module to store/fetch state in inode
 	fuse_module_states module_states;
@@ -876,11 +878,112 @@ static void fuse_reply_errno(fuse_req_t req, int res)
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+
+/* Called with inode mutex locked */
+static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd)
+{
+	auto ino = inode.ino();
+
+	if (inode.backing_id) {
+		if (fs.debug())
+			cerr << "DEBUG: reusing shared backing file "
+				<< inode.backing_id << " for inode " << ino << endl;
+		return inode.backing_id;
+	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
+		cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
+			<< ", disabling kernel passthrough." << endl;
+		fs.opts.kernel_passthrough = false;
+		return 0;
+	} else {
+		if (fs.debug())
+			cerr << "DEBUG: setup shared backing file "
+				<< inode.backing_id << " for inode " << ino << endl;
+		return inode.backing_id;
+	}
+}
+
+/* Called with inode mutex locked */
+static void inode_passthrough_close(fuse_req_t req, Inode &inode)
+{
+	auto ino = inode.ino();
+
+	if (inode.backing_id) {
+		if (fuse_passthrough_close(req, inode.backing_id) < 0) {
+			cerr << "DEBUG: fuse_passthrough_close failed for inode "
+				<< ino << " backing file " << inode.backing_id << endl;
+		} else if (fs.debug()) {
+			cerr << "DEBUG: closed backing file " << inode.backing_id
+				<< " for inode " << ino << endl;
+		}
+		inode.backing_id = 0;
+	}
+}
+
+static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
+{
+	auto inode_ptr = get_inode(ino);
+	Inode &inode = *inode_ptr;
+	if (inode.dead())
+		return false;
+
+	lock_guard<mutex> g {inode.m};
+	inode.nopen++;
+
+	if (!fs.opts.kernel_passthrough)
+		return false;
+
+	// If kernel passthrough is enabled, but not for this fd, use dio,
+	// because another open fd of this inode may have already put the
+	// inode in passthrough io mode.
+	if (!fi->passthrough_read || !fi->passthrough_write) {
+		fi->direct_io = 1;
+		return false;
+	}
+
+	// Setup a shared backing file on first open of an inode
+	auto fd = get_file_fd(fi);
+	auto backing_id = inode_passthrough_open(req, inode, fd);
+	if (!backing_id)
+		return  false;
+
+	// Do not clean cache on open of kernel passthrough fd and
+	// do not call flush on close of kernel passthrough fd
+	fi->backing_id = backing_id;
+	fi->keep_cache = true;
+	fi->noflush = true;
+	return true;
+}
+
+static void file_passthrough_close(fuse_req_t req, Inode &inode, fuse_file_info *)
+{
+	lock_guard<mutex> g {inode.m};
+	inode.nopen--;
+
+	/* Close the shared backing file on last file close of an inode */
+	if (inode.backing_id && !inode.nopen)
+		inode_passthrough_close(req, inode);
+}
+
+
 static void pfs_init(void *userdata, fuse_conn_info *conn)
 {
 	(void)userdata;
 	if (conn->capable & FUSE_CAP_EXPORT_SUPPORT)
 		conn->want |= FUSE_CAP_EXPORT_SUPPORT;
+
+	// Check availability of kernel read/write passthrough feature
+	if (fs.opts.kernel_passthrough) {
+		if (conn->capable & FUSE_CAP_PASSTHROUGH)
+			conn->want |= FUSE_CAP_PASSTHROUGH;
+		else
+			fs.opts.kernel_passthrough = false;
+	}
+	cout << "INFO: kernel read/write passthrough "
+		<< (fs.opts.kernel_passthrough ? "enabled" : "disabled" ) << endl;
+
+	/* Passthrough and writeback cache are conflicting modes */
+	if (fs.opts.kernel_passthrough)
+		fs.opts.wbcache = false;
 
 	if (fs.opts.wbcache && conn->capable & FUSE_CAP_WRITEBACK_CACHE)
 		conn->want |= FUSE_CAP_WRITEBACK_CACHE;
@@ -1497,7 +1600,7 @@ static int do_rename(const fuse_path_at &oldat, const fuse_path_at &newat,
 			newat.dirfd(), newat.path());
 }
 
-static void forget_one(fuse_ino_t ino, uint64_t n);
+static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n);
 
 static void pfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 		       fuse_ino_t newparent, const char *newname,
@@ -1520,7 +1623,7 @@ static void pfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	fuse_entry_param e {};
 	res = do_lookup(newat, &e);
 	if (!res)
-		forget_one(e.ino, 1);
+		forget_one(req, e.ino, 1);
 	fuse_reply_errno(req, res);
 }
 
@@ -1540,7 +1643,7 @@ static void pfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
 	fuse_reply_errno(req, res);
 }
 
-static void forget_one(fuse_ino_t ino, uint64_t n)
+static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 {
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
@@ -1558,6 +1661,7 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 	}
 	inode.nlookup -= n;
 	if (!inode.nlookup) {
+		auto backing_id = inode.backing_id;
 		int ninodes;
 		{
 			lock_guard<mutex> g_fs {fs.m};
@@ -1569,6 +1673,18 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 		if (fs.debug())
 			cerr << "DEBUG: forget: cleaning up inode " << src_ino
 				<< " inode count is " << ninodes << endl;
+
+		// Close the shared backing file on inode evict
+		if (backing_id) {
+			if (fuse_passthrough_close(req, backing_id) < 0) {
+				cerr << "DEBUG: fuse_passthrough_close failed for inode "
+					<< ino << " backing file " << backing_id << endl;
+			} else if (fs.debug()) {
+				cerr << "DEBUG: closed backing file " << backing_id
+					<< " for inode " << ino << endl;
+			}
+		}
+
 	} else if (fs.debug()) {
 		cerr << "DEBUG: forget: inode " << src_ino
 			<< " lookup count now " << inode.nlookup << endl;
@@ -1577,7 +1693,7 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 
 static void pfs_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
 {
-	forget_one(ino, nlookup);
+	forget_one(req, ino, nlookup);
 	fuse_reply_none(req);
 }
 
@@ -1585,7 +1701,7 @@ static void pfs_forget_multi(fuse_req_t req, size_t count,
 			     fuse_forget_data *forgets)
 {
 	for (unsigned i = 0; i < count; i++)
-		forget_one(forgets[i].ino, forgets[i].nlookup);
+		forget_one(req, forgets[i].ino, forgets[i].nlookup);
 	fuse_reply_none(req);
 }
 
@@ -1737,7 +1853,7 @@ static int fill_dir(void *_buf, const char *name, const struct stat *attr,
 		if (fs.debug())
 			cerr << "DEBUG: readdir(): buffer full, returning data. " << endl;
 		if (e.ino)
-			forget_one(e.ino, 1);
+			forget_one(buf->at.req(), e.ino, 1);
 		return 0;
 	}
 
@@ -1931,7 +2047,7 @@ static void pfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		return;
 	}
 
-	fi->noflush = !fs.opts.wbcache;
+	file_passthrough_open(req, e.ino, fi);
 	fuse_reply_create(req, &e, fi);
 }
 
@@ -1993,13 +2109,14 @@ static void pfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		return;
 	}
 	fi->keep_cache = !fs.opts.nocache;
-	fi->noflush = !fs.opts.wbcache;
+	file_passthrough_open(req, ino, fi);
 	fuse_reply_open(req, fi);
 }
 
 static void pfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 {
-	InodeRef inode(get_inode(ino));
+	auto inode_ptr = get_inode(ino);
+	InodeRef inode(inode_ptr);
 	if (inode.error(req))
 		return;
 
@@ -2007,6 +2124,7 @@ static void pfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 	if (fs.opts.async_flush && fi->flush)
 		call_op(flush)(at, fi);
 	call_op(release)(at, fi);
+	file_passthrough_close(req, *inode_ptr, fi);
 	fuse_reply_err(req, 0);
 }
 
