@@ -103,6 +103,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.nocache = options.count("nocache");
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.keep_fd = !opts.nocache;
+	opts.connected_fd = true;
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
 
 	auto rp = realpath(argv[1], NULL);
