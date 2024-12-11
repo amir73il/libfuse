@@ -90,8 +90,14 @@ struct fuse_file_info {
 	    on close. */
 	unsigned int noflush : 1;
 
+	/** Can be filled in by open, to indicate that I/O on the file
+	    can be performed by the library (or kernel). */
+	unsigned int passthrough_read : 1;
+	unsigned int passthrough_write : 1;
+	unsigned int passthrough_readdir : 1;
+
 	/** Padding.  Reserved for future use*/
-	unsigned int padding : 23;
+	unsigned int padding : 20;
 	unsigned int padding2 : 32;
 
 	/** File handle id.  May be filled in by filesystem in create,
