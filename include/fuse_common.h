@@ -104,8 +104,13 @@ struct fuse_file_info {
 	 */
 	uint32_t kill_suidgid : 1;
 
+	/** Can be filled in by open, to indicate that I/O on the file
+	    can be performed by the library (or kernel). */
+	uint32_t passthrough_read : 1;
+	uint32_t passthrough_write : 1;
+
 	/** Padding.  Reserved for future use*/
-	uint32_t padding : 22;
+	uint32_t padding : 20;
 	uint32_t padding2 : 32;
 	uint32_t padding3 : 32;
 
