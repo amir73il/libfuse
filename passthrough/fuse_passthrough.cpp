@@ -69,6 +69,92 @@
 using namespace std;
 
 
+#define XFS_FILEID_TYPE_64FLAG  0x80    /* NFS fileid has 64bit inodes */
+#define XFS_FILEID_INO64_GEN (1 | XFS_FILEID_TYPE_64FLAG)
+#define FS_FILEID_INO32_GEN 1
+
+struct fid64 {
+	uint64_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct fid32 {
+	uint32_t ino;
+	uint32_t gen;
+} __attribute__((packed));
+
+struct xfs_fh {
+	struct file_handle fh;
+	union {
+		struct fid64 fid;
+		struct fid32 fid32;
+	};
+
+	xfs_fh(ino_t src_ino) {
+		// Initialize file handle buffer to detect -o inode64/inode32
+		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = 0;
+		fid.ino = fid.gen = 0;
+		// Remember src_ino in case file handles are not supported
+		nodeid = ino = src_ino;
+	}
+
+	// Reconstruct file handle buffer from <ino;gen>
+	// With ext4, this also works with gen 0 (for any)
+	void encode(bool ino32)
+	{
+		if (ino32)
+			init_fid32(ino, gen);
+		else
+			init_fid64(ino, gen);
+	}
+
+	void init_fid64(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode64
+		fh.handle_bytes = sizeof(fid);
+		fh.handle_type = XFS_FILEID_INO64_GEN;
+		fid.ino = ino;
+		fid.gen = gen;
+	}
+
+	void init_fid32(ino_t ino, uint32_t gen)
+	{
+		// Construct xfs file handle from ino/gen for -o inode32
+		fh.handle_bytes = sizeof(fid32);
+		fh.handle_type = FS_FILEID_INO32_GEN;
+		fid32.ino = ino;
+		fid32.gen = gen;
+	}
+
+	// FILEID_INO32_GEN could be xfs with -o inode32, ext4 or many other fs
+	bool is_ino32() { return fh.handle_type == FS_FILEID_INO32_GEN; }
+	bool is_ino64() { return fh.handle_type == XFS_FILEID_INO64_GEN; }
+
+	// Extract source <ino;gen> and FUSE ino from source file handle
+	bool decode()
+	{
+		if (is_ino64()) {
+			nodeid = fid.ino;
+			ino = fid.ino;
+			gen = fid.gen;
+			return true;
+		}
+
+		if (is_ino32()) {
+			nodeid = fid32.ino;
+			ino = fid32.ino;
+			gen = fid32.gen;
+			return true;
+		}
+		return false;
+	}
+
+	ino_t nodeid{0};
+	ino_t ino{0};
+	uint32_t gen{0};
+};
+
 struct fd_guard {
 	int _fd {-1};
 
@@ -106,15 +192,18 @@ private:
 };
 
 struct Inode {
-	int _fd {0}; // O_PATH fd
+	int _fd {0}; // > 0 for long lived O_PATH fd; -1 for open_by_handle
 	int _ftype {ftype_unknown};
-	ino_t src_ino {0};
+	xfs_fh src_fh {0};
 	uint64_t nlookup {0};
 	// Allow each module to store/fetch state in inode
 	fuse_module_states module_states;
 	mutex m;
 
-	bool dead() { return !src_ino; }
+	ino_t ino() { return src_fh.ino; }
+	ino_t gen() { return src_fh.gen; }
+	ino_t nodeid() { return src_fh.nodeid; }
+	bool dead() { return !src_fh.ino; }
 
 	Inode(int num_modules) : module_states(num_modules) {}
 	// Delete copy constructor and assignments. We could implement
@@ -125,7 +214,7 @@ struct Inode {
 	Inode& operator=(const Inode&) = delete;
 
 	void keepfd(fd_guard& newfd) {
-		// Keep O_PATH fd in inode cache
+		// Upgrade short lived fd to long lived fd in inode cache
 		_fd = newfd._fd;
 		newfd._fd = -1;
 	}
@@ -159,6 +248,9 @@ struct Fs : public fuse_passthrough_module {
 	uid_t uid;
 	gid_t gid;
 	dev_t src_dev;
+	bool ino32 {false};
+	bool fhandles {true};
+	bool bulkstat {true};
 	int num_modules;
 
 	Fs() : fuse_passthrough_module("default") {
@@ -169,7 +261,15 @@ struct Fs : public fuse_passthrough_module {
 		inodes[0].reset(new Inode(0));
 	}
 
+	const char *source() { return opts.source.c_str(); }
 	void init_root();
+	int open_by_fh(xfs_fh &fh);
+	uint32_t xfs_bulkstat_gen(__u64 ino);
+
+private:
+	void get_root_fh(ino_t src_ino);
+
+	int _bulkstat_fd{-1};
 };
 static Fs fs{};
 
@@ -243,34 +343,116 @@ void __trace_fd_path_at(const fuse_path_at &at, const char *caller)
 		at.print_fd_path(caller);
 }
 
+uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
+{
+	__s32 count = 0;
+	struct xfs_bstat bstat = { };
+	struct xfs_fsop_bulkreq breq = {
+		.lastip = &ino,
+		.icount = 1,
+		.ubuffer = (void *)&bstat,
+		.ocount = &count,
+	};
+
+	if (_bulkstat_fd < 0)
+		_bulkstat_fd = openat(root->_fd, ".", O_DIRECTORY);
+	if (_bulkstat_fd < 0 ||
+	    ioctl(_bulkstat_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
+		auto saverr = errno;
+		cerr << "INFO: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		errno = saverr;
+		// Try open by handle with zero generation
+		return 0;
+	}
+
+	if (debug()) {
+		cerr << "DEBUG: xfs_bulkstat_gen(): ino=" << ino << ", count=" << count
+			<< ", bs_ino=" << bstat.bs_ino  << ", bs_gen=" << bstat.bs_gen <<  endl;
+	}
+
+	return bstat.bs_gen;
+}
+
+int Fs::open_by_fh(xfs_fh &fh)
+{
+	if (!fhandles) {
+		errno = ESTALE;
+		return -1;
+	}
+
+	int fd = open_by_handle_at(root->_fd, &fh.fh, O_PATH);
+	if (fd < 0)
+		return fd;
+
+	return fd;
+}
+
+void Fs::get_root_fh(ino_t src_ino)
+{
+	int mount_id;
+	struct xfs_fh xfs_fh{src_ino};
+	auto ret = name_to_handle_at(root->_fd, "", &xfs_fh.fh, &mount_id,
+				     AT_EMPTY_PATH);
+
+	if (ret < 0 || !xfs_fh.decode() || src_ino != xfs_fh.ino) {
+		// Will keep open O_PATH fd instead of open_by_handle()
+		fhandles = false;
+		warn("WARNING: source filesystem file handle type not supported");
+	} else {
+		root->src_fh = xfs_fh;
+		// Auto detect xfs with -o inode32 (or ext4)
+		ino32 = xfs_fh.is_ino32();
+		// bulkstat support is an indication of xfs
+		bulkstat = xfs_bulkstat_gen(src_ino);
+		if (!bulkstat && errno == EPERM)
+			errx(1, "ERROR: insufficient privileges");
+		cout << "INFO: source filesystem looks like "
+			<< ((bulkstat || xfs_fh.is_ino64()) ? "xfs" : "ext4")
+			<< " -o inode" << (ino32 ? "32" : "64") << endl;
+	}
+}
+
 void Fs::init_root()
 {
-	root.reset(new Inode(num_modules));
+	root.reset(new Inode(fs.num_modules));
 	root->nlookup = 9999;
 
 	struct stat stat;
-	const char *source = opts.source.c_str();
-	auto ret = lstat(source, &stat);
+	auto ret = lstat(source(), &stat);
 	if (ret == -1)
-		err(1, "ERROR: failed to stat source (\"%s\")", source);
+		err(1, "ERROR: failed to stat source (\"%s\")", source());
 	if (!S_ISDIR(stat.st_mode))
 		errx(1, "ERROR: source is not a directory");
 	src_dev = stat.st_dev;
 	root->_ftype = ftype_dir;
-	root->src_ino = stat.st_ino;
-	root->_fd = open(source, O_PATH);
+	// Used as mount_fd for open_by_handle_at() - O_PATH fd is not enough
+	root->_fd = open(source(), O_DIRECTORY | O_RDONLY);
 	if (root->_fd == -1)
-		err(1, "ERROR: open(\"%s\")", source);
+		err(1, "ERROR: open(\"%s\")", source());
+
+	if (fs.opts.keep_fd)
+		fhandles = false;
+	else
+		get_root_fh(stat.st_ino);
+
+	// We never need to open root fd by fh
+	root->src_fh.ino = stat.st_ino;
+	root->src_fh.nodeid = FUSE_ROOT_ID;
 }
 
+// Short lived reference of inode to keep fd open
 struct InodeRef : fuse_inode {
-	int fd {-1};
+	int fd {-1}; // Short lived O_PATH fd
 	InodePtr i;
 
 	int get_fd() const override { return fd; }
 	fuse_state_t& get_state(const fuse_passthrough_module &module) {
 		return i->module_states.get_state(module);
 	}
+	ino_t ino() const override { return i->ino(); }
+	ino_t gen() const override { return i->gen(); }
+	ino_t nodeid() const override { return i->nodeid(); }
+	file_handle *get_file_handle() const override { return &i->src_fh.fh; }
 
 	bool is_dir() const override {
 		return i->_ftype == ftype_dir;
@@ -302,9 +484,12 @@ struct InodeRef : fuse_inode {
 
 		fd = openfd ? i->_fd : 0;
 		if (fd == -1) {
+			fd = fs.open_by_fh(inode->src_fh);
+		}
+		if (fd == -1) {
 			fd = -errno;
 			cerr << "INFO: failed to open fd for inode "
-				<< i->src_ino << endl;
+				<< ino() << endl;
 		}
 	}
 
@@ -348,7 +533,7 @@ bool get_module_inode_state(const fuse_passthrough_module &module,
 			    fuse_ino_t ino, fuse_state_t &ret_state,
 			    fuse_fill_state_t filler, void *data)
 {
-	// Get a reference to inode with O_PATH fd to be used by filler
+	// Open a short lived O_PATH fd to be used by filler
 	InodeRef inode(get_inode(ino), !!filler);
 	if (inode.is_dead())
 		return false;
@@ -630,7 +815,21 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	}
 
 	auto src_ino = e->attr.st_ino;
-	auto root_ino = fs.root->src_ino;
+	auto root_ino = fs.root->ino();
+
+	int mount_id;
+	struct xfs_fh xfs_fh{src_ino};
+	if (fs.fhandles) {
+		res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id, AT_EMPTY_PATH);
+		if (res == -1) {
+			auto saveerr = errno;
+			if (fs.debug())
+				cerr << "DEBUG: lookup(): name_to_handle_at failed" << endl;
+			return saveerr;
+		}
+		if (!xfs_fh.decode() && fs.debug())
+			cerr << "DEBUG: lookup(): failed to decode file handle" << endl;
+	}
 
 	if (e->attr.st_dev != fs.src_dev) {
 		cerr << "WARNING: Mountpoints in the source directory tree will be hidden." << endl;
@@ -643,9 +842,14 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		// found root when reconnecting directory file handle, i.e. lookup(ino, "..")
 		e->ino = FUSE_ROOT_ID;
 		return 0;
-	} else {
-		e->ino = src_ino;
+	} else if (src_ino != xfs_fh.ino) {
+		cerr << "ERROR: Source st_ino " << src_ino <<
+			" and file handle ino " << xfs_fh.ino << " mismatch." << endl;
+		return EIO;
 	}
+
+	e->ino = xfs_fh.nodeid;
+	e->generation = xfs_fh.gen;
 
 	unique_lock<mutex> fs_lock {fs.m};
 	auto iter = fs.inodes.find(e->ino);
@@ -661,6 +865,11 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		return ENOMEM;
 	}
 
+	auto is_dir = S_ISDIR(e->attr.st_mode);
+	// Hold long lived fd in inode if requested or if open_by_handle() is not supported
+	// and always keep long lived fd for subdirs of root
+	auto keep_fd = fs.opts.keep_fd || !fs.fhandles || (at.inode().is_root() && is_dir);
+
 	// Use convenience reference to Inode
 	Inode &inode = *inode_ptr;
 	if (found) { // found existing inode
@@ -673,8 +882,18 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		}
 		if (fs.debug())
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
-				<< ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 		lock_guard<mutex> g {inode.m};
+		if (inode.gen() != xfs_fh.gen) {
+			if (fs.debug())
+				cerr << "DEBUG: lookup(): inode " << src_ino
+					<< " generation " << inode.gen()
+					<< " mismatch - reused inode." << endl;
+			inode.src_fh = xfs_fh;
+		}
+		// Maybe update long lived fd if inode was initialized by lookup(".")
+		if (inode._fd == -1 && keep_fd)
+			inode.keepfd(newfd_g);
 		inode.nlookup++;
 	} else { // no existing inode
 		/* This is just here to make Helgrind happy. It violates the
@@ -683,15 +902,20 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		   thread has access to the inode mutex */
 		lock_guard<mutex> g {inode.m};
 		inode.set_ftype(e->attr.st_mode);
-		inode.src_ino = src_ino;
+		inode.src_fh = xfs_fh;
 		inode.nlookup = 1;
-		// Keep O_PATH fd in inode
-		inode.keepfd(newfd_g);
+		if (keep_fd) {
+			// Hold long lived fd in inode
+			inode.keepfd(newfd_g);
+		} else {
+			// Mark inode for open_by_handle()
+			inode._fd = -1;
+		}
 		fs_lock.unlock();
 
 		if (fs.debug())
 			cerr << "DEBUG: lookup(): created userspace inode " << src_ino
-				<< ",fd = " << inode._fd << endl;
+				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
 	}
 
 	return 0;
@@ -723,9 +947,17 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 			return;
 		}
 		inode_p.reset(i);
-		// request to open by FUSE file handle
+		// Request to open disconnected inode by FUSE file handle
+		// FUSE LOOKUP(ino, ".") does not pass the generation
 		inode_p->_fd = -1;
-		inode_p->src_ino = parent;
+		xfs_fh &fh = inode_p->src_fh;
+		fh.nodeid = fh.ino = parent;
+		// With XFS, we try to use bulkstat to get generation from ino
+		if (fs.bulkstat)
+			fh.gen = fs.xfs_bulkstat_gen(parent);
+		// Reconstruct file handle from <ino;gen>
+		if (fs.fhandles)
+			fh.encode(fs.ino32);
 	} else {
 		inode_p = get_inode(parent);
 	}
@@ -1034,20 +1266,20 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 	if (inode.dead())
 		return;
 
+	auto src_ino = inode.ino();
 	if (n > inode.nlookup) {
 		cerr << "INTERNAL ERROR: Negative lookup count ("
 			<< inode.nlookup << " - " << n <<
-			") for inode " << inode.src_ino << endl;
+			") for inode " << src_ino << endl;
 		n = inode.nlookup;
 	}
 	inode.nlookup -= n;
 	if (!inode.nlookup) {
-		auto src_ino = inode.src_ino;
 		int ninodes;
 		{
 			lock_guard<mutex> g_fs {fs.m};
 			// Mark dead inode to protect against racing with lookup
-			inode.src_ino = 0;
+			inode.src_fh.ino = 0;
 			fs.inodes.erase(ino);
 			ninodes = fs.inodes.size();
 		}
@@ -1055,7 +1287,7 @@ static void forget_one(fuse_ino_t ino, uint64_t n)
 			cerr << "DEBUG: forget: cleaning up inode " << src_ino
 				<< " inode count is " << ninodes << endl;
 	} else if (fs.debug()) {
-		cerr << "DEBUG: forget: inode " << inode.src_ino
+		cerr << "DEBUG: forget: inode " << src_ino
 			<< " lookup count now " << inode.nlookup << endl;
 	}
 }
@@ -1201,7 +1433,7 @@ static int fill_dir(void *_buf, const char *name, const struct stat *attr,
 
 	fuse_entry_param e {};
 	size_t entsize;
-	// With readdirplus, lookup to get ino
+	// With readdirplus, lookup to get <ino,generation>
 	if (plus) {
 		auto err = __do_lookup(buf->at, name, &e);
 		if (err) {
