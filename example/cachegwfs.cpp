@@ -183,7 +183,7 @@ static CgwFs fs{};
 // Check if the operation @op was configured with redirect_op rule
 // or if this file/directory is an empty place holder (a.k.a stub)
 // Return true if any of the above conditions are met.
-static bool should_redirect_fd(const char *procname, enum op op)
+static bool should_redirect_fd(int fd, const char *procname, enum op op)
 {
 	// redirect all ops with --redirect cmdline option
 	if (fs.redirect_op(OP_ALL))
@@ -198,6 +198,7 @@ static bool should_redirect_fd(const char *procname, enum op op)
 	case OP_LOOKUP:
 	case OP_OPEN_RO:
 		break;
+	case OP_CREATE:
 	case OP_OPEN_RW:
 		rw = true;
 		break;
@@ -212,7 +213,10 @@ static bool should_redirect_fd(const char *procname, enum op op)
 	for (const auto& xattr : redirect_xattr) {
 		ssize_t res;
 
-		res = getxattr(procname, xattr.c_str(), NULL, 0);
+		if (procname)
+			res = getxattr(procname, xattr.c_str(), NULL, 0);
+		else
+			res = fgetxattr(fd, xattr.c_str(), NULL, 0);
 		if (res > 0)
 			return true;
 	}
@@ -235,7 +239,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 
 	int n = 0;
 	char linkname[PATH_MAX];
-	bool redirect = should_redirect_fd(in.proc_path(), op);
+	bool redirect = should_redirect_fd(dirfd, in.proc_path(), op);
 	if (redirect)
 		n = readlink(in.proc_path(), linkname, PATH_MAX);
 
@@ -266,6 +270,53 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 		// Return a copy of the path we got
 		return in;
 	}
+}
+
+static enum op redirect_open_op(fuse_file_info *fi)
+{
+	enum op op;
+
+	if (fi->flags & O_CREAT)
+		op = OP_CREATE;
+	else if ((fi->flags & O_ACCMODE) == O_RDONLY)
+		op = OP_OPEN_RO;
+	else
+		op = OP_OPEN_RW;
+
+	return op;
+}
+
+static int check_safe_fd(fuse_file_info *fi, enum op op)
+{
+	auto fd = get_file_fd(fi);
+
+	// cachegw manager takes an exclusive lock before making file a stub
+	if (flock(fd, LOCK_SH | LOCK_NB) == -1) {
+		auto saverr = errno;
+		cerr << "INFO: file is locked for read/write access." << endl;
+		errno = saverr;
+		return -1;
+	}
+
+	// Check that file is still not a stub after lock
+	if (!should_redirect_fd(fd, NULL, op))
+		return 0;
+
+	cerr << "INFO: file open raced with evict." << endl;
+	errno = EAGAIN;
+	return -1;
+}
+
+static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
+{
+	// flock non-redirected fd
+	auto redirected = (at.dirfd() == AT_FDCWD && !at.follow());
+	if (!redirected && check_safe_fd(fi, op) == -1) {
+		release_file(fi);
+		return -1;
+	}
+
+	return 0;
 }
 
 //
@@ -381,7 +432,8 @@ static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 
 static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 {
-	auto out = get_fd_path_op(in, OP_CREATE);
+	enum op op = redirect_open_op(fi);
+	auto out = get_fd_path_op(in, op);
 	// Do not passthrough to redirected fd
 	if (out.cwd())
 		fi->passthrough_read = fi->passthrough_write = false;
@@ -390,12 +442,12 @@ static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return 0;
+	return finish_open(out, fi, op);
 }
 
 static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 {
-	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	enum op op = redirect_open_op(fi);
 	auto out = get_fd_path_op(in, op);
 	// Do not passthrough to redirected fd
 	if (out.cwd())
@@ -405,7 +457,7 @@ static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return 0;
+	return finish_open(out, fi, op);
 }
 
 static int cgwfs_statfs(const fuse_path_at &in, struct statvfs *stbuf)
@@ -680,6 +732,11 @@ static Redirect *read_config_file()
 			redirect->set_op(value);
 		}
 	}
+
+	// create() also opens for write, so when configured to redirect
+	// all opens for write we also need to redirect create()
+	if (redirect->test_op(OP_OPEN_RW))
+		redirect->set_op(OP_CREATE);
 
 	fs.opts.debug = debug;
 
