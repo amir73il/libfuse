@@ -213,6 +213,8 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
             # Piggyback redirect mode on debug mode
             redirect = True
             cmdline.append('--redirect')
+            # Redirect dirfd relative paths to full src_dir paths
+            cmdline.append('--redirect_path=' + src_dir)
 
     cmdline.append('--' + mode)
 
