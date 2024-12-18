@@ -73,6 +73,7 @@ enum op {
 	OP_CHOWN,
 	OP_TRUNCATE,
 	OP_UTIMENS,
+	// "writedir" operations on parent directory
 	OP_CREATE,
 	OP_MKDIR,
 	OP_MVDIR,
@@ -82,6 +83,7 @@ enum op {
 	OP_RENAME,
 	OP_UNLINK,
 	OP_SYMLINK,
+	// redirect for specific xattr name prefixes
 	OP_GETXATTR,
 	OP_SETXATTR,
 	// redirect fd opened in open() and used in copy_file_range() if needed
@@ -127,6 +129,7 @@ struct Redirect {
 	vector<string> read_xattr;
 	vector<string> write_xattr;
 	vector<string> readdir_xattr;
+	vector<string> writedir_xattr;
 	vector<string> xattr_prefixes;
 	set<enum op> ops; // fs operations to redirect
 
@@ -211,8 +214,25 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 	case OP_OPEN_RO:
 		break;
 	case OP_CREATE:
+		// before create() we are called with dirfd+name and file does not
+		// exist, so we check stub xattr on parent dir.
+		// after create() we are called again with the opened file fd and
+		// then we need to verify that the opened file is not a stub.
+		is_dir = !!procname;
+		// fallthrough
 	case OP_OPEN_RW:
 		rw = true;
+		break;
+	case OP_MKNOD:
+	case OP_MKDIR:
+	case OP_RMDIR:
+	case OP_MVDIR:
+	case OP_LINK:
+	case OP_UNLINK:
+	case OP_RENAME:
+	case OP_SYMLINK:
+		rw = true;
+		is_dir = true;
 		break;
 	default:
 		return fs.redirect_op(op);
@@ -220,7 +240,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 
 	// redirect read/write if it has stub xattr
 	auto r = fs.redirect();
-	const auto &redirect_xattr = rw ? r->write_xattr :
+	const auto &redirect_xattr = rw ?
+		(is_dir ? r->writedir_xattr : r->write_xattr) :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
 
 	for (const auto& xattr : redirect_xattr) {
@@ -878,6 +899,8 @@ static Redirect *read_config_file()
 			redirect->readdir_xattr.push_back(value);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr.push_back(value);
+		} else if (name == "redirect_writedir_xattr") {
+			redirect->writedir_xattr.push_back(value);
 		} else if (name == "redirect_xattr_prefix") {
 			redirect->xattr_prefixes.push_back(value);
 		} else if (name == "redirect_op") {
