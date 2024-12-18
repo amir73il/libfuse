@@ -67,6 +67,7 @@ enum op {
 	OP_GETATTR,
 	OP_OPEN_RO,
 	OP_OPEN_RW,
+	OP_OPENDIR,
 	OP_STATFS,
 	OP_CHMOD,
 	OP_CHOWN,
@@ -74,6 +75,7 @@ enum op {
 	OP_UTIMENS,
 	OP_CREATE,
 	OP_MKDIR,
+	OP_MVDIR,
 	OP_RMDIR,
 	OP_MKNOD,
 	OP_LINK,
@@ -93,6 +95,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_GETATTR, "getattr" },
 	{ OP_OPEN_RO, "open_ro" },
 	{ OP_OPEN_RW, "open_rw" },
+	{ OP_OPENDIR, "opendir" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CHMOD, "chmod" },
 	{ OP_CHOWN, "chown" },
@@ -100,6 +103,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_UTIMENS, "utimens" },
 	{ OP_CREATE, "create" },
 	{ OP_MKDIR, "mkdir" },
+	{ OP_MVDIR, "mvdir" },
 	{ OP_RMDIR, "rmdir" },
 	{ OP_MKNOD, "mknod" },
 	{ OP_LINK, "link" },
@@ -122,6 +126,7 @@ static const char *op_name(enum op op) {
 struct Redirect {
 	vector<string> read_xattr;
 	vector<string> write_xattr;
+	vector<string> readdir_xattr;
 	vector<string> xattr_prefixes;
 	set<enum op> ops; // fs operations to redirect
 
@@ -197,9 +202,12 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 	if (fs.redirect_op(op))
 		return true;
 
-	bool rw = false;
+	bool rw = false, is_dir = false;
 	switch (op) {
 	case OP_LOOKUP:
+	case OP_OPENDIR:
+		is_dir = true;
+		break;
 	case OP_OPEN_RO:
 		break;
 	case OP_CREATE:
@@ -212,7 +220,8 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 
 	// redirect read/write if it has stub xattr
 	auto r = fs.redirect();
-	const auto &redirect_xattr = rw ? r->write_xattr : r->read_xattr;
+	const auto &redirect_xattr = rw ? r->write_xattr :
+		(is_dir ? r->readdir_xattr : r->read_xattr);
 
 	for (const auto& xattr : redirect_xattr) {
 		ssize_t res;
@@ -405,6 +414,16 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 	return 0;
 }
 
+static bool path_is_dir(const fuse_path_at &at)
+{
+	struct stat st;
+
+	if (fstatat(at.dirfd(), at.path(), &st, at.flags()) == 0)
+		return S_ISDIR(st.st_mode);
+
+	return false;
+}
+
 //
 // cachegwfs operations
 //
@@ -492,11 +511,17 @@ static int cgwfs_rmdir(const fuse_path_at &in)
 	return next_op(rmdir)(out);
 }
 
+static enum op redirect_rename_op(const fuse_path_at &at)
+{
+	return path_is_dir(at) ? OP_MVDIR : OP_RENAME;
+}
+
 static int cgwfs_rename(const fuse_path_at &oldin, const fuse_path_at &newin,
 			unsigned int flags)
 {
-	auto oldout = get_fd_path_op(oldin, OP_RENAME);
-	auto newout = get_fd_path_op(newin, OP_RENAME);
+	auto op = redirect_rename_op(oldin);
+	auto oldout = get_fd_path_op(oldin, op);
+	auto newout = get_fd_path_op(newin, op);
 	return next_op(rename)(oldout, newout, flags);
 }
 
@@ -508,7 +533,7 @@ static int cgwfs_unlink(const fuse_path_at &in)
 
 static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
 {
-	auto out = get_fd_path_op(in, OP_OPEN_RO);
+	auto out = get_fd_path_op(in, OP_OPENDIR);
 	// Do not passthrough to redirected fd
 	if (out.cwd())
 		fi->passthrough_readdir = false;
@@ -849,6 +874,8 @@ static Redirect *read_config_file()
 			fs.opts.entry_timeout = stoi(value);
 		} else if (name == "redirect_read_xattr") {
 			redirect->read_xattr.push_back(value);
+		} else if (name == "redirect_readdir_xattr") {
+			redirect->readdir_xattr.push_back(value);
 		} else if (name == "redirect_write_xattr") {
 			redirect->write_xattr.push_back(value);
 		} else if (name == "redirect_xattr_prefix") {
