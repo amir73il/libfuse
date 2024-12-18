@@ -55,6 +55,7 @@
 #include <set>
 
 #include "fuse_passthrough.h"
+#include "fuse_helpers.h"
 
 using namespace std;
 
@@ -176,6 +177,323 @@ private:
 };
 static CgwFs fs{};
 
+#define next_op(op) call_module_next_op(fs, op)
+
+
+// Check if the operation @op was configured with redirect_op rule
+// or if this file/directory is an empty place holder (a.k.a stub)
+// Return true if any of the above conditions are met.
+static bool should_redirect_fd(const char *procname, enum op op)
+{
+	// redirect all ops with --redirect cmdline option
+	if (fs.redirect_op(OP_ALL))
+		return true;
+
+	// redirect specific op with config redirect_op = <op name>
+	if (fs.redirect_op(op))
+		return true;
+
+	bool rw = false;
+	switch (op) {
+	case OP_LOOKUP:
+	case OP_OPEN_RO:
+		break;
+	case OP_OPEN_RW:
+		rw = true;
+		break;
+	default:
+		return fs.redirect_op(op);
+	}
+
+	// redirect read/write if it has stub xattr
+	auto r = fs.redirect();
+	const auto &redirect_xattr = rw ? r->write_xattr : r->read_xattr;
+
+	for (const auto& xattr : redirect_xattr) {
+		ssize_t res;
+
+		res = getxattr(procname, xattr.c_str(), NULL, 0);
+		if (res > 0)
+			return true;
+	}
+	return false;
+}
+
+// Convert <dirfd+name> to redirected path if @op is in redirect ops
+// and on open of a stub file or directory
+static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
+{
+	__trace_fd_path_at(in, op_name(op));
+
+	auto dirfd = in.dirfd();
+	auto name = in.path();
+
+	if (dirfd == AT_FDCWD) {
+		// No dirfd - return a copy of the path we got
+		return in;
+	}
+
+	int n = 0;
+	char linkname[PATH_MAX];
+	bool redirect = should_redirect_fd(in.proc_path(), op);
+	if (redirect)
+		n = readlink(in.proc_path(), linkname, PATH_MAX);
+
+	int prefix = fs.opts.source.size();
+	if (redirect && prefix && n >= prefix &&
+	    !memcmp(fs.opts.source.c_str(), linkname, prefix)) {
+		linkname[n] = 0;
+		auto outpath = fs.redirect_path;
+		if (fs.redirect_path.empty())
+			outpath.append(linkname);
+		else
+			outpath.append(linkname + prefix, n - prefix);
+		if (!in.empty()) {
+			outpath.append("/");
+			outpath.append(name);
+		}
+		if (fs.debug())
+			cerr << "DEBUG: redirect " << op_name(op)
+				<< " |=> " << outpath << endl;
+		// Return redirected path
+		return fuse_path_at_cwd(in, outpath.c_str());
+	} else {
+		if (redirect && prefix) {
+			// We need to redirect, but we don't know where to
+			cerr << "ERROR: redirect " << op_name(op) << "(" << name << "): "
+				<< linkname << " not under " << fs.opts.source << endl;
+		}
+		// Return a copy of the path we got
+		return in;
+	}
+}
+
+//
+// cachegwfs operations
+//
+static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
+{
+	// Check if reading parent directory should be redirected
+        // and lookup child in redirected path to trigger populate of the
+	// stub directory before lookup in source path
+	if (!is_dot_or_dotdot(at.path())) {
+		auto out = get_fd_path_op(at, OP_LOOKUP);
+		if (out.dirfd() != at.dirfd() &&
+		    faccessat(out.dirfd(), out.path(), F_OK, out.flags())) {
+			if (fs.debug())
+				cerr << "faccessat(" << out.path() << ", " << out.flags()
+					<< "): " << strerror(errno) << endl;
+			return -1;
+		}
+	}
+	// Lookup itself is never in the redirected path, because we
+	// need to find the real xfs inode
+	return next_op(lookup)(at, e);
+}
+
+static int cgwfs_getattr(const fuse_path_at &in, struct stat *attr,
+			 fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_GETATTR);
+	return next_op(getattr)(out, attr, fi);
+}
+
+static int cgwfs_chmod(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_CHMOD);
+	return next_op(chmod)(out, mode, fi);
+}
+
+static int cgwfs_chown(const fuse_path_at &in, uid_t uid, gid_t gid,
+		       fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_CHOWN);
+	return next_op(chown)(out, uid, gid, fi);
+}
+
+static int cgwfs_truncate(const fuse_path_at &in, off_t size, fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_TRUNCATE);
+	return next_op(truncate)(out, size, fi);
+}
+
+static int cgwfs_utimens(const fuse_path_at &in, const struct timespec tv[2],
+			 struct fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_UTIMENS);
+	return next_op(utimens)(out, tv, fi);
+}
+
+static int cgwfs_mkdir(const fuse_path_at &in, mode_t mode)
+{
+	auto out = get_fd_path_op(in, OP_MKDIR);
+	return next_op(mkdir)(out, mode);
+}
+
+static int cgwfs_symlink(const char *link, const fuse_path_at &in)
+{
+	auto out = get_fd_path_op(in, OP_SYMLINK);
+	return next_op(symlink)(link, out);
+}
+
+static int cgwfs_mknod(const fuse_path_at &in, mode_t mode, dev_t rdev)
+{
+	auto out = get_fd_path_op(in, OP_MKNOD);
+	return next_op(mknod)(out, mode, rdev);
+}
+
+static int cgwfs_link(const fuse_path_at &oldin, const fuse_path_at &newin)
+{
+	auto oldout = get_fd_path_op(oldin, OP_LINK);
+	auto newout = get_fd_path_op(newin, OP_LINK);
+	return next_op(link)(oldout, newout);
+}
+
+static int cgwfs_rmdir(const fuse_path_at &in)
+{
+	auto out = get_fd_path_op(in, OP_RMDIR);
+	return next_op(rmdir)(out);
+}
+
+static int cgwfs_rename(const fuse_path_at &oldin, const fuse_path_at &newin,
+			unsigned int flags)
+{
+	auto oldout = get_fd_path_op(oldin, OP_RENAME);
+	auto newout = get_fd_path_op(newin, OP_RENAME);
+	return next_op(rename)(oldout, newout, flags);
+}
+
+static int cgwfs_unlink(const fuse_path_at &in)
+{
+	auto out = get_fd_path_op(in, OP_UNLINK);
+	return next_op(unlink)(out);
+}
+
+static int cgwfs_opendir(const fuse_path_at &in, fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_OPEN_RO);
+	// Do not passthrough to redirected fd
+	if (out.cwd())
+		fi->passthrough_readdir = false;
+
+	return next_op(opendir)(out, fi);
+}
+
+static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
+{
+	auto out = get_fd_path_op(in, OP_CREATE);
+	// Do not passthrough to redirected fd
+	if (out.cwd())
+		fi->passthrough_read = fi->passthrough_write = false;
+
+	auto ret = next_op(create)(out, mode, fi);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
+{
+	enum op op = (fi->flags & O_ACCMODE) == O_RDONLY ? OP_OPEN_RO : OP_OPEN_RW;
+	auto out = get_fd_path_op(in, op);
+	// Do not passthrough to redirected fd
+	if (out.cwd())
+		fi->passthrough_read = fi->passthrough_write = false;
+
+	auto ret = next_op(open)(out, fi);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int cgwfs_statfs(const fuse_path_at &in, struct statvfs *stbuf)
+{
+	auto out = get_fd_path_op(in, OP_STATFS);
+	return next_op(statfs)(out, stbuf);
+}
+
+const string sys_acl_xattr_prefix = "system.posix_acl";
+
+static bool xattr_starts_with(const char *name, const string &prefix)
+{
+	return !prefix.empty() &&
+		strncmp(name, prefix.c_str(), prefix.size()) == 0;
+}
+static enum op redirect_xattr_op(enum op op, const char *name)
+{
+	if (fs.debug())
+		cerr << "DEBUG: " << op_name(op) << " " << name << endl;
+
+	// redirect xattr ops for names that match a redirect_xattr_prefix
+	for (const auto& prefix : fs.redirect()->xattr_prefixes) {
+	    if (xattr_starts_with(name, prefix))
+		return OP_REDIRECT;
+	}
+
+	// redirect implicit chmod/chown via setfacl
+	if (op == OP_SETXATTR && (fs.redirect_op(OP_CHMOD) || fs.redirect_op(OP_CHOWN)) &&
+	    xattr_starts_with(name, sys_acl_xattr_prefix))
+		return OP_REDIRECT;
+
+	return op;
+}
+
+static int cgwfs_getxattr(const fuse_path_at &in, const char *name, char *value,
+			  size_t size)
+{
+	auto op = redirect_xattr_op(OP_GETXATTR, name);
+	auto out = get_fd_path_op(in, op);
+	return next_op(getxattr)(out, name, value, size);
+}
+
+static int cgwfs_listxattr(const fuse_path_at &in, char *value, size_t size)
+{
+	auto out = get_fd_path_op(in, OP_GETXATTR);
+	return next_op(listxattr)(out, value, size);
+}
+
+static int cgwfs_setxattr(const fuse_path_at &in, const char *name,
+			  const char *value, size_t size, int flags)
+{
+	auto op = redirect_xattr_op(OP_SETXATTR, name);
+	auto out = get_fd_path_op(in, op);
+	return next_op(setxattr)(out, name, value, size, flags);
+}
+
+static int cgwfs_removexattr(const fuse_path_at &in, const char *name)
+{
+	auto op = redirect_xattr_op(OP_SETXATTR, name);
+	auto out = get_fd_path_op(in, op);
+	return next_op(removexattr)(out, name);
+}
+
+
+static void cgwfs_assign_operations(fuse_passthrough_operations &oper)
+{
+	oper.lookup = cgwfs_lookup;
+	oper.getattr = cgwfs_getattr;
+	oper.chmod = cgwfs_chmod;
+	oper.chown = cgwfs_chown;
+	oper.truncate = cgwfs_truncate;
+	oper.utimens = cgwfs_utimens;
+	oper.mkdir = cgwfs_mkdir;
+	oper.mknod = cgwfs_mknod;
+	oper.symlink = cgwfs_symlink;
+	oper.link = cgwfs_link;
+	oper.rmdir = cgwfs_rmdir;
+	oper.rename = cgwfs_rename;
+	oper.unlink = cgwfs_unlink;
+	oper.opendir = cgwfs_opendir;
+	oper.create = cgwfs_create;
+	oper.open = cgwfs_open;
+	oper.statfs = cgwfs_statfs;
+	oper.setxattr = cgwfs_setxattr;
+	oper.getxattr = cgwfs_getxattr;
+	oper.listxattr = cgwfs_listxattr;
+	oper.removexattr = cgwfs_removexattr;
+}
 
 static void print_usage(cxxopts::Options& parser, char *prog_name) {
 	cout << "\nUsage: " << prog_name << " [options] <source> <mountpoint>\n";
@@ -434,8 +752,11 @@ int main(int argc, char *argv[])
 			 fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
-	fuse_passthrough_module *modules[] = {};
+	cgwfs_assign_operations(fs.oper);
 
-	return fuse_passthrough_main(&args, fs.opts, modules, 0,
-				     sizeof(fs.oper));
+	// If we are not redirecting, do not register cachegwfs module
+	int num_modules = !fs.redirect_path.empty();
+	fuse_passthrough_module *modules[] = { &fs };
+
+	return fuse_passthrough_main(&args, fs.opts, modules, num_modules, sizeof(fs.oper));
 }
