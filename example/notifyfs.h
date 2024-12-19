@@ -10,7 +10,8 @@
 #ifndef NOTIFYFS_H_
 #define NOTIFYFS_H_
 
-void nfyfs_init(fuse_passthrough_opts &opts, std::string index_path);
+void nfyfs_init(fuse_passthrough_opts &opts, std::string index_path,
+		bool index_new = false);
 fuse_passthrough_module *nfyfs_module(void);
 
 #endif /* NOTIFYFS_H_ */
