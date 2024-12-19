@@ -56,12 +56,14 @@
 #include "fuse_passthrough.h"
 #include "fuse_helpers.h"
 #include "notifyfs.h"
+#include "statx.h"
 
 using namespace std;
 
 
 struct NotifyFs : public fuse_passthrough_module {
 	string index_prefix;
+	chrono::nanoseconds index_btime{0ns};
 
 	NotifyFs() : fuse_passthrough_module("notifyfs") {}
 
@@ -69,6 +71,9 @@ struct NotifyFs : public fuse_passthrough_module {
 	// index_prefix is not a directory, it's a template of a directory entry name.
 	bool is_indexed() {
 		return !index_prefix.empty();
+	}
+	bool btime_supported() {
+		return index_btime != 0ns;
 	}
 };
 static NotifyFs nfyfs{};
@@ -155,15 +160,58 @@ static string fh_index_path(struct file_handle *fh)
 	return nfyfs.index_prefix + buf2hex(fh->f_handle, fh->handle_bytes);
 }
 
+// Get immutable creation time of directory from filesystem (e.g. xfs, ext4)
+static chrono::nanoseconds get_dir_btime_nsec(int dirfd, const char *path)
+{
+	chrono::nanoseconds nsec{0ns};
+	struct statx stx = {};
+
+	if (statx(dirfd, path, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH,
+		  STATX_MODE | STATX_BTIME, &stx)) {
+		if (nfyfs.debug())
+			cerr << "ERROR: statx() failed" << endl;
+		return nsec;
+	}
+
+	if (S_ISDIR(stx.stx_mode) && (stx.stx_mask & STATX_BTIME)) {
+		// Pre 1970 btime not supported
+		if (stx.stx_btime.tv_sec < 0)
+			return nsec;
+
+		nsec = chrono::seconds{stx.stx_btime.tv_sec} +
+			chrono::nanoseconds{stx.stx_btime.tv_nsec};
+	}
+
+	return nsec;
+}
+
+// Check if directory was created after index dir
+static bool dir_is_new(int dirfd, ino_t ino)
+{
+	if (!nfyfs.btime_supported())
+		return false;
+
+	auto btime = get_dir_btime_nsec(dirfd, "");
+	if (btime <= nfyfs.index_btime)
+		return false;
+
+	if (nfyfs.debug())
+		cerr << "DEBUG: directory inode " << ino
+			<< " is newer than index" << endl;
+
+	return true;
+}
+
 static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 			      fill_index_ctx *ctx)
 {
 	if (idx->test(IDX_SELF))
 		return;
 
-	// Treat all non-dir as indexed, becauses we only need to
-	// trigger indexing for directories
-	if (!inode.is_dir()) {
+	// Treat all non-dir and new directories as indexed, becauses we
+	// only need to trigger indexing for directories that existed
+	// at the time that index was created.
+	if (!inode.is_dir() || dir_is_new(inode.get_fd(), inode.ino())) {
 		idx->set(IDX_SELF);
 		return;
 	}
@@ -256,7 +304,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 			<< " index state " << idx->bits() << endl;
 
 	// Do not allow modifications to inode unless all path elements
-	// (all parent directories and self) are indexed.
+	// (all parent directories and self) are indexed or newer than index.
 	return (op == OP_RO) || idx->test(IDX_PATH);
 }
 
@@ -438,6 +486,11 @@ void nfyfs_init(fuse_passthrough_opts &opts, string index_path)
 	nfyfs.opts = opts;
 	nfyfs_assign_operations(nfyfs.oper);
 	nfyfs.index_prefix = index_path + '/';
+	nfyfs.index_btime = get_dir_btime_nsec(AT_FDCWD, index_path.c_str());
+	if (!nfyfs.btime_supported()) {
+		cerr << "INFO: creation time not supported by filesystem on "
+			<< index_path << endl;
+	}
 }
 
 fuse_passthrough_module *nfyfs_module(void)
