@@ -192,11 +192,12 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
     else:
         umount(mount_process, mnt_dir)
 
-@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs', 'cachegwfs'))
+@pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs', 'cachegwfs', 'notifyfs'))
 @pytest.mark.parametrize("mode", ('', 'debug', 'wbcache', 'nopassthrough', 'nocache'))
 def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
+    index_dir = str(short_tmpdir.mkdir('index'))
     cache = (mode != 'nocache')
 
     cmdline = base_cmdline + \
@@ -206,7 +207,7 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     cmdline.append('--foreground')
 
     redirect = None
-    if name == 'cachegwfs':
+    if name in ['cachegwfs', 'notifyfs']:
         cmdline.append('--nokeepfd')
         cmdline.append('--readdirpassthrough')
         if mode == 'debug':
@@ -221,6 +222,7 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         else:
             # Piggyback redirect=copy on read cache mode
             redirect = "copy"
+
     if redirect:
         config_file = 'cachegwfs.config'
         with open(config_file, 'w') as fh:
@@ -228,6 +230,9 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         # Redirect dirfd relative paths to full src_dir paths
         cmdline.append('--redirect_path=' + src_dir)
         cmdline.append('--config_file=' + config_file)
+
+    if name == 'notifyfs':
+        cmdline.append('--index_path=' + index_dir)
 
     cmdline.append('--' + mode)
 
