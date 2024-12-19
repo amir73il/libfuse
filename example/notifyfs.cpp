@@ -637,7 +637,7 @@ static void nfyfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.removexattr = nfyfs_removexattr;
 }
 
-void nfyfs_init(fuse_passthrough_opts &opts, string index_path)
+void nfyfs_init(fuse_passthrough_opts &opts, string index_path, bool index_all)
 {
 	nfyfs.opts = opts;
 	nfyfs_assign_operations(nfyfs.oper);
@@ -646,6 +646,9 @@ void nfyfs_init(fuse_passthrough_opts &opts, string index_path)
 	if (!nfyfs.btime_supported()) {
 		cerr << "INFO: creation time not supported by filesystem on "
 			<< index_path << endl;
+	} else if (index_all) {
+		nfyfs.index_btime = 0ns;
+		cerr << "INFO: ignoring index creation time" << endl;
 	}
 }
 

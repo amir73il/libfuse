@@ -233,6 +233,10 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
 
     if name == 'notifyfs':
         cmdline.append('--index_path=' + index_dir)
+        # All directories in the test are newer then index, so index also
+        # new directories in all redirect runs for better test coverage
+        if redirect:
+            cmdline.append('--index_all')
 
     cmdline.append('--' + mode)
 

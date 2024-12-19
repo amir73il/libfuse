@@ -916,6 +916,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		 cxxopts::value<string>()->default_value(CONFIG_FILE), "FILE");
 
 	opt_parser.add_options("notifyfs")
+		("index_all", "Index also new directories")
 		("index_path", "Path to index directory",
 		 cxxopts::value<string>(), "PATH");
 
@@ -1181,8 +1182,9 @@ int main(int argc, char *argv[])
 	fuse_passthrough_module *nfyfs = NULL;
 	if (options.count("index_path")) {
 		auto index_path = options["index_path"].as<string>();
+		auto index_all = !!options.count("index_all");
 		cout << "notifyfs index is " << index_path << endl;
-		nfyfs_init(fs.opts, index_path);
+		nfyfs_init(fs.opts, index_path, index_all);
 		nfyfs = nfyfs_module();
 		num_modules++;
 	}
