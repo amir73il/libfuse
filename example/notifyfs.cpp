@@ -124,6 +124,7 @@ enum index_op {
 
 struct fill_index_ctx {
 	bool create;
+	index_op op;
 };
 
 
@@ -170,12 +171,22 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 	auto index_path = fh_index_path(inode.get_file_handle());
 	struct stat stat;
 	auto ret = lstat(index_path.c_str(), &stat);
-	if (ret == -1)
-		return;
+	auto rw = (ctx->op != OP_RO);
+	if (ret == -1) {
+		if (errno != ENOENT || !rw)
+			return;
+
+		ret = mkdir(index_path.c_str(), 0755);
+		if (ret == -1 && errno != EEXIST)
+			return;
+	} else {
+		rw = false;
+	}
 
 	if (nfyfs.debug())
 		cerr << "DEBUG: directory inode " << inode.ino()
-			<< " is indexed" << endl;
+			<< (rw ? " was now" : " is already")
+			<< " indexed" << endl;
 
 	idx->set(IDX_SELF);
 	return;
@@ -208,10 +219,11 @@ static bool fill_index_state(const fuse_inode &inode,
 }
 
 static IndexState *get_index_state(ino_t ino, fuse_state_t &state,
-				   bool create = false)
+				   index_op op, bool create = false)
 {
 	fill_index_ctx ctx = {
 		.create = create,
+		.op = op,
 	};
 
 	if (!get_module_inode_state(nfyfs, ino, state, fill_index_state,
@@ -234,7 +246,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 		return true;
 
 	fuse_state_t state;
-	auto idx = get_index_state(inode.nodeid(), state);
+	auto idx = get_index_state(inode.nodeid(), state, op);
 	if (!idx)
 		return false;
 
@@ -290,7 +302,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 init_state:
 	// Inode state is created on lookup() and may be updated later
 	fuse_state_t state;
-	idx = get_index_state(e->ino, state, true);
+	idx = get_index_state(e->ino, state, OP_RO, true);
 	if (!idx) {
 		cerr << "ERROR: no index state. ino=" << e->ino << endl;
 		return 0;
