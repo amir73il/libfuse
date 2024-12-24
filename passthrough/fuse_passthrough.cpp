@@ -120,6 +120,43 @@ static struct fid32_encoder : fh_encoder {
 		((struct fid32 *)fh.f_handle)->ino = ino;
 		((struct fid32 *)fh.f_handle)->gen = gen;
 	}
+	bool is_connectable(const struct file_handle &fh) const override {
+		return (fh.handle_type & FS_FILEID_TYPE_MASK) ==
+			FS_FILEID_INO32_GEN_PARENT;
+	}
+	bool get_parent_fh(const struct file_handle &fh,
+			   struct file_handle &parent_fh) const override {
+		if (!is_connectable(fh))
+			return false;
+
+		// Construct parent file handle from connectable fh
+		parent_fh.handle_bytes = offsetof(struct fid32, parent_ino);
+		parent_fh.handle_type = FS_FILEID_INO32_GEN;
+		((struct fid32 *)parent_fh.f_handle)->ino =
+			((struct fid32 *)fh.f_handle)->parent_ino;
+		((struct fid32 *)parent_fh.f_handle)->gen =
+			((struct fid32 *)fh.f_handle)->parent_gen;
+		return true;
+	}
+	bool make_connectable(struct file_handle &fh,
+			      const struct file_handle &parent_fh) const override {
+		if (is_connectable(fh))
+			return true;
+
+		if (fh.handle_type != FS_FILEID_INO32_GEN ||
+		    parent_fh.handle_type != FS_FILEID_INO32_GEN)
+			return false;
+
+		// Combine parent+child non-connectable 32bit ino file handles
+		// into a connectable file handle
+		fh.handle_bytes = sizeof(struct fid32);
+		fh.handle_type = FS_FILEID_INO32_GEN_PARENT;
+		((struct fid32 *)fh.f_handle)->parent_ino =
+			((struct fid32 *)parent_fh.f_handle)->ino;
+		((struct fid32 *)fh.f_handle)->parent_gen =
+			((struct fid32 *)parent_fh.f_handle)->gen;
+		return true;
+	}
 } fid32_encoder;
 
 static struct fid64_encoder : fh_encoder {
@@ -147,6 +184,43 @@ static struct fid64_encoder : fh_encoder {
 		fh.handle_type = FS_FILEID_INO64_GEN;
 		((struct fid64 *)fh.f_handle)->ino = ino;
 		((struct fid64 *)fh.f_handle)->gen = gen;
+	}
+	bool is_connectable(const struct file_handle &fh) const override {
+		return (fh.handle_type & FS_FILEID_TYPE_MASK) ==
+			FS_FILEID_INO64_GEN_PARENT;
+	}
+	bool get_parent_fh(const struct file_handle &fh,
+			   struct file_handle &parent_fh) const override {
+		if (!is_connectable(fh))
+			return false;
+
+		// Construct parent file handle from connectable fh
+		parent_fh.handle_bytes = offsetof(struct fid64, parent_ino);
+		parent_fh.handle_type = FS_FILEID_INO64_GEN;
+		((struct fid64 *)parent_fh.f_handle)->ino =
+			((struct fid64 *)fh.f_handle)->parent_ino;
+		((struct fid64 *)parent_fh.f_handle)->gen =
+			((struct fid64 *)fh.f_handle)->parent_gen;
+		return true;
+	}
+	bool make_connectable(struct file_handle &fh,
+			      const struct file_handle &parent_fh) const override {
+		if (is_connectable(fh))
+			return true;
+
+		if (fh.handle_type != FS_FILEID_INO64_GEN ||
+		    parent_fh.handle_type != FS_FILEID_INO64_GEN)
+			return false;
+
+		// Combine parent+child non-connectable 64bit ino file handles
+		// into a connectable file handle
+		fh.handle_bytes = sizeof(struct fid64);
+		fh.handle_type = FS_FILEID_INO64_GEN_PARENT;
+		((struct fid64 *)fh.f_handle)->parent_ino =
+			((struct fid64 *)parent_fh.f_handle)->ino;
+		((struct fid64 *)fh.f_handle)->parent_gen =
+			((struct fid64 *)parent_fh.f_handle)->gen;
+		return true;
 	}
 } fid64_encoder;
 
@@ -377,6 +451,87 @@ struct Cred {
 };
 
 
+fuse_empty_path_at::fuse_empty_path_at(fuse_req_t req, fuse_inode &inode) :
+	fuse_path_at(req, inode, "")
+{
+	if (!fs.fhandles || !fs.opts.connected_fd)
+	       return;
+
+	// For empty path, try to make sure that we have an fd with known path
+	if (reconnect())
+	       return;
+
+	if (fs.debug())
+		cerr << "WARNING: inode " << inode.ino() << ", fd " << inode.get_fd()
+			<< " path is unknown" << endl;
+}
+
+bool fuse_path_at::reconnect() const
+{
+	if (is_connected())
+	       return true;
+
+	auto encoder = fs.get_encoder();
+	auto const &fh = *inode().get_file_handle();
+	xfs_fh dir_fh{0};
+	if (!encoder->get_parent_fh(fh, dir_fh.fh))
+		return false;
+
+	auto ino = inode().ino();
+	auto dirfd = open_by_handle_at(fs.root->_fd, &dir_fh.fh, O_DIRECTORY);
+	if (dirfd < 0) {
+		if (fs.debug())
+			cerr << "ERROR: failed to open by parent fh of inode "
+				<< ino << ", errno=" << errno << endl;
+		return false;
+	}
+
+	DIR *dp = fdopendir(dirfd);
+	if (dp == NULL) {
+		close(dirfd);
+		return false;
+	}
+
+	// look for the child in the parent directory
+	while(1) {
+		struct dirent *de;
+		de = readdir(dp);
+		if (!de)
+			break;
+		if (de->d_ino == ino) {
+			// child found - look it up to connect its dentry in cache
+			faccessat(dirfd, de->d_name, F_OK, AT_SYMLINK_NOFOLLOW);
+			if (fs.debug())
+				cerr << "DEBUG: found child '" << de->d_name
+					<< "' with inode " << ino << endl;
+			break;
+		}
+	}
+	closedir(dp);
+
+	// close the disconnected fd and reopen the fd hoping to get a connected alias
+	inode().close_fd();
+	inode().open_fd();
+
+	return is_connected();
+}
+
+bool fuse_path_at::is_connected() const
+{
+	char linkname[3];
+	int n = 0;
+
+	// Path is connected if it is a non-empty path relative to a dirfd
+	if (!empty() && !is_magic())
+		return true;
+
+	n = readlink(proc_path(), linkname, 3);
+	// magic link to "/" means disconnected (unknown) path
+	// NOTE that a known unlinked path is also connected, e.g.:
+	// -> "/path/to/file (deleted)"
+	return n > 2 || strncmp(linkname, "/", 2);
+}
+
 // Prints fuse path argument.
 // Unless path is relative to CWD also prints the dirfd symlink path.
 void fuse_path_at::print_fd_path(const char *caller) const
@@ -565,14 +720,29 @@ struct InodeRef : fuse_inode {
 		if (i->dead())
 			return;
 
-		fd = openfd ? i->_fd : 0;
+		if (openfd)
+			open_fd();
+		else
+			fd = 0;
+	}
+
+	void open_fd() override {
+		fd = i->_fd;
 		if (fd == -1) {
-			fd = fs.open_by_fh(inode->src_fh);
+			fd = fs.open_by_fh(i->src_fh);
 		}
 		if (fd == -1) {
 			fd = -errno;
 			cerr << "INFO: failed to open fd for inode "
 				<< ino() << endl;
+		}
+	}
+
+	void close_fd() override {
+		// Only close the short lived fd
+		if (fd > 0 && fd != i->_fd) {
+			close(fd);
+			fd = -1;
 		}
 	}
 
@@ -591,8 +761,7 @@ struct InodeRef : fuse_inode {
 	}
 
 	~InodeRef() {
-		if (fd > 0 && fd != i->_fd)
-			close(fd);
+		close_fd();
 	}
 };
 
@@ -958,7 +1127,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	auto keep_fd = fs.opts.keep_fd || !fs.fhandles || (at.inode().is_root() && is_dir);
 	// For non-dir looked up by name, store a connectable fh with parent,
 	// so that we can use it later to open an fd with a known path
-	auto want_connectable = fs.at_connectable && parent_ino && !is_dir;
+	auto want_connectable = fs.opts.connected_fd && fs.fhandles && parent_ino && !is_dir;
 
 	// Use convenience reference to Inode
 	Inode &inode = *inode_ptr;
@@ -985,7 +1154,8 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		// or inode may have been reconnected after it was found by LOOKUP "."
 		auto encoder = fs.get_encoder();
 		if (want_connectable &&
-		    parent_ino != encoder->parent_ino(inode.src_fh.fh)) {
+		    parent_ino != encoder->parent_ino(inode.src_fh.fh) &&
+		    encoder->make_connectable(xfs_fh.fh, *(at.inode().get_file_handle()))) {
 			if (fs.debug())
 				cerr << "DEBUG: lookup(): inode " << src_ino
 					<< " parent " << parent_ino
