@@ -103,7 +103,9 @@ enum {
 // We only ever set bits in a state after allocating a fuse_state_t.
 // Resetting an index state is only possible via clear_module_inode_state().
 struct IndexState {
-	IndexState() = default;
+	ino_t parent;
+
+	IndexState(ino_t p) : parent(p) {}
 
 	bool set(unsigned mask) {
 		return IDX_VALID(indexed.fetch_or(mask, memory_order_relaxed));
@@ -128,7 +130,7 @@ enum index_op {
 };
 
 struct fill_index_ctx {
-	bool create;
+	ino_t parent;
 	index_op op;
 };
 
@@ -245,16 +247,33 @@ static bool fill_index_state(const fuse_inode &inode,
 {
 	auto idx = IDX_STATE(state);
 	auto ctx = (fill_index_ctx *) data;
+	auto ino = inode.ino();
+	auto parent = ctx->parent;
+
+	// Reset existing state on idx->parent mismatch
+	if (idx && parent && parent != idx->parent) {
+		if (nfyfs.debug())
+			cerr << "DEBUG: reset inode " << ino
+				<< " indexed state "
+				<< " old parent " << idx->parent
+				<< " new parent " << parent << endl;
+		idx = NULL;
+	}
 
 	if (!idx) {
-		if (!ctx->create)
+		if (!parent) {
+			if (nfyfs.debug())
+				cerr << "ERROR: no indexed state"
+					<< " ino=" << ino << endl;
 			return false;
+		}
 
-		idx = new (nothrow) IndexState;
+		idx = new (nothrow) IndexState(parent);
 		if (!idx) {
 			if (nfyfs.debug())
 				cerr << "ERROR: failed allocating indexed state"
-					<< " ino=" << inode.ino() << endl;
+					<< " parent=" << parent
+					<< " ino=" << ino << endl;
 			return false;
 		}
 
@@ -266,11 +285,16 @@ static bool fill_index_state(const fuse_inode &inode,
 	return true;
 }
 
+//
+// Get inode index state
+//
+// @parent 0 means get existing inode state with any idx->parent.
+// Otherwise, find or create a state with @parent as idx->parent.
 static IndexState *get_index_state(ino_t ino, fuse_state_t &state,
-				   index_op op, bool create = false)
+				   index_op op, ino_t parent = 0)
 {
 	fill_index_ctx ctx = {
-		.create = create,
+		.parent = parent,
 		.op = op,
 	};
 
@@ -348,17 +372,27 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 			<< " indexed state " << idx->bits() << endl;
 
 init_state:
-	// Inode state is created on lookup() and may be updated later
+	// Lookup of same inode from a different path (e.g. hardlink)
+	// will reset the inode state to that of the new path.
 	fuse_state_t state;
-	idx = get_index_state(e->ino, state, OP_RO, true);
+	idx = get_index_state(e->ino, state, OP_RO, parent.nodeid());
 	if (!idx) {
 		cerr << "ERROR: no index state. ino=" << e->ino << endl;
 		return 0;
 	}
 
 	// Record in inode state if all its ancestors are indexed
-	if (parent_indexed)
+	if (parent_indexed) {
 		idx->set(IDX_PARENT);
+	} else if (idx->test(IDX_PARENT)) {
+		// This can happen if ancestor was renamed in the source
+		// from an indexed path without indexing the new path
+		clear_module_inode_state(nfyfs, e->ino);
+		if (nfyfs.debug())
+			cerr << "ERROR: inconsistent indexed state"
+				<< " parent=" << parent.ino()
+				<< " ino=" << e->attr.st_ino << endl;
+	}
 
 	return 0;
 }
