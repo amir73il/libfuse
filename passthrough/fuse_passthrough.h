@@ -64,6 +64,13 @@ struct fh_encoder {
 	virtual uint32_t parent_gen(struct file_handle &fh) const = 0;
 	virtual ino_t nodeid(struct file_handle &fh) const = 0;
 	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
+	virtual bool is_connectable(const struct file_handle &fh) const = 0;
+	virtual bool make_connectable(struct file_handle &fh,
+				      const struct file_handle &parent_fh) const = 0;
+	virtual bool get_parent_fh(const struct file_handle &fh,
+				   struct file_handle &parent_fh) const = 0;
+	virtual bool get_fid(const struct file_handle &fh,
+			     struct file_handle &fid) const = 0;
 	virtual ~fh_encoder() {}
 };
 
@@ -81,10 +88,14 @@ struct fuse_states {
 
 struct fuse_inode : fuse_states {
 	virtual int get_fd() const = 0;
+	virtual void open_fd() = 0;
+	virtual void close_fd() = 0;
 	virtual ino_t ino() const = 0;
 	virtual ino_t gen() const = 0;
 	virtual ino_t nodeid() const = 0;
 	virtual file_handle *get_file_handle() const = 0;
+	/* Get a unique file id instead of connectable file handle */
+	virtual bool get_fid(struct file_handle &fid) const = 0;
 
 	virtual bool is_dir() const = 0;
 	virtual bool is_regular() const = 0;
@@ -128,7 +139,7 @@ struct fuse_path_at {
 	 * If @path is empty and @at_cwd is true, fuse_path_at is initialized
 	 * with the magic symlink of the inode's fd.
 	 */
-	fuse_path_at(fuse_req_t req, const fuse_inode &inode, const char *path,
+	fuse_path_at(fuse_req_t req, fuse_inode &inode, const char *path,
 		     bool at_cwd = false, bool magic = false) :
 		_req(req), _inode(inode), _path(path), _magic(magic) {
 		init_path(at_cwd);
@@ -176,13 +187,15 @@ struct fuse_path_at {
 	virtual bool follow() const { return _magic; }
 	virtual bool is_magic() const { return _magic; }
 	virtual fuse_req_t req() const { return _req; }
-	virtual const fuse_inode& inode() const { return _inode; }
+	virtual fuse_inode& inode() const { return _inode; }
 	virtual const char *proc_path() const { return _proc_path; }
 
 	virtual void print_fd_path(const char *caller) const;
+	virtual bool is_connected() const;
+	virtual bool reconnect() const;
 private:
 	fuse_req_t _req;
-	const fuse_inode &_inode;
+	fuse_inode &_inode;
 	std::string _path;
 	int _dirfd;
 	bool _magic;
@@ -208,7 +221,7 @@ private:
 
 /* Path to be used for syscalls that take an fd argument */
 struct fuse_fd_path_at : fuse_path_at {
-	fuse_fd_path_at(fuse_req_t req, const fuse_inode &inode,
+	fuse_fd_path_at(fuse_req_t req, fuse_inode &inode,
 			struct fuse_file_info *fi) :
 		fuse_path_at(req, inode, ""), file(fi) {}
 
@@ -217,8 +230,7 @@ struct fuse_fd_path_at : fuse_path_at {
 
 /* Path to be used for syscalls that take dirfd with empty path */
 struct fuse_empty_path_at : fuse_path_at {
-	fuse_empty_path_at(fuse_req_t req, const fuse_inode &inode) :
-		fuse_path_at(req, inode, "") {}
+	fuse_empty_path_at(fuse_req_t req, fuse_inode &inode);
 };
 
 /* Path to be used for syscalls that do not take dirfd or empty path */
