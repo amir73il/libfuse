@@ -82,6 +82,7 @@ enum op {
 	OP_SYMLINK,
 	OP_GETXATTR,
 	OP_SETXATTR,
+	// redirect fd opened in open() and used in copy_file_range() if needed
 	OP_COPY,
 	// redirect all ops with --redirect cmdline option
 	OP_ALL,
@@ -304,7 +305,8 @@ static int get_file_redirect_fd(fuse_file_info *fi)
 		cerr << "DEBUG: get redirect_fd=" << rfd
 			<< ", fd=" << get_file_fd(fi) << endl;
 	}
-	return rfd;
+	// AT_FDCWD state means open itself was redirected
+	return rfd == AT_FDCWD ? get_file_fd(fi) : rfd;
 }
 
 static bool set_file_redirect_fd(fuse_file_info *fi, int rfd)
@@ -369,15 +371,33 @@ static int check_safe_fd(fuse_file_info *fi, enum op op)
 
 static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 {
-	// flock non-redirected fd
 	auto redirected = (at.dirfd() == AT_FDCWD && !at.follow());
-	if (!redirected && check_safe_fd(fi, op) == -1) {
+	int rfd = -1;
+	bool fail = false;
+
+	if (redirected) {
+		// Store AT_FDCWD state to indicate that open was redirected
+		rfd = AT_FDCWD;
+	} else if (check_safe_fd(fi, op) == -1) {
+		fail = true;
+	} else if (fs.redirect_op(OP_COPY)) {
+		// open redirect fd in addition to the bypass fd.
+		// when called from create(), we must not try to create
+		// a file in redirect path, only to open it.
+		rfd = open_redirect_fd(at, fi, fi->flags & ~O_CREAT);
+		if (rfd == -1)
+			fail = true;
+	}
+
+	// initialize redirect fd state
+	if (!fail && !set_file_redirect_fd(fi, rfd))
+		fail = true;
+
+	if (fail) {
 		release_file(fi);
 		return -1;
 	}
 
-	// initialize redirect fd state
-	set_file_redirect_fd(fi, -1);
 	return 0;
 }
 
@@ -598,35 +618,26 @@ static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
 }
 #endif
 
-static ssize_t cgwfs_copy_file_range(const fuse_path_at &at_in,
+static ssize_t cgwfs_copy_file_range(const fuse_path_at &,
 				struct fuse_file_info *fi_in, off_t off_in,
-				const fuse_path_at &at_out,
+				const fuse_path_at &,
 				struct fuse_file_info *fi_out, off_t off_out,
 				size_t len, int flags)
 {
 	ssize_t res;
 	auto fd_in = get_file_fd(fi_in);
 	auto fd_out = get_file_fd(fi_out);
-	auto redirect = fs.redirect_op(OP_COPY);
+	auto rfd_in = get_file_redirect_fd(fi_in);
+	auto rfd_out = get_file_redirect_fd(fi_out);
 
-	// Check if fd_in or fd_out are already redirected
-	// and store/fetch the redirected fds in file state
+	// If one of the fds are redirected, use both redirected fds for copy
+	auto redirect = (fd_in == rfd_in || fd_out == rfd_out);
 	if (redirect) {
-		fd_in = get_file_redirect_fd(fi_in);
-		if (fd_in == -1) {
-			fd_in = open_redirect_fd(at_in, fi_in, O_RDONLY);
-			if (fd_in == -1)
-				return -1;
-			set_file_redirect_fd(fi_in, fd_in);
-		}
+		if (rfd_in == -1 || rfd_out == -1)
+			return -1;
 
-		fd_out = get_file_redirect_fd(fi_out);
-		if (fd_out == -1) {
-			fd_out = open_redirect_fd(at_out, fi_out, O_RDWR);
-			if (fd_out == -1)
-				return -1;
-			set_file_redirect_fd(fi_out, fd_out);
-		}
+		fd_in = rfd_in;
+		fd_out = rfd_out;
 	}
 
 	// To simplify, always terminate the copy_file_range() operation
