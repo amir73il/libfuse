@@ -103,6 +103,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.nocache = options.count("nocache");
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
+	// With --nocache also do not allow keeping open fds
+	if (options.count("nocache"))
+		opts.keep_fd = 0;
 
 	auto rp = realpath(argv[1], NULL);
 	if (!rp) {

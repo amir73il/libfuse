@@ -38,12 +38,17 @@ struct fuse_passthrough_opts {
 	bool foreground{false};
 	bool clone_fd{true};
 	bool debug{false};
+	// > 0: keeps only open fds
+	//   0: keeps only file handles and fails if not supported
+	// < 0: keeps open fds if file handles are not supported
+	int keep_fd{-1};
 	unsigned int max_threads{0};
 	unsigned int max_idle_threads{0};
 };
 
 struct fuse_passthrough_module;
 struct fuse_inode;
+struct file_handle;
 
 using fuse_state_t = uint64_t;
 using fuse_module_states = std::vector<fuse_state_t>;
@@ -65,6 +70,9 @@ struct fuse_states {
 struct fuse_inode : fuse_states {
 	virtual int get_fd() const = 0;
 	virtual ino_t ino() const = 0;
+	virtual ino_t gen() const = 0;
+	virtual ino_t nodeid() const = 0;
+	virtual file_handle *get_file_handle() const = 0;
 
 	virtual bool is_dir() const = 0;
 	virtual bool is_regular() const = 0;
