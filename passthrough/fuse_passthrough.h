@@ -55,6 +55,15 @@ using fuse_module_states = std::vector<fuse_state_t>;
 using fuse_fill_state_t =
 	std::function<bool(const fuse_inode &, fuse_state_t &, void *)>;
 
+struct fh_encoder {
+	virtual int ino_size() const = 0;
+	virtual ino_t ino(struct file_handle &fh) const = 0;
+	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t nodeid(struct file_handle &fh) const = 0;
+	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
+	virtual ~fh_encoder() {}
+};
+
 struct fuse_states {
 	fuse_states(fuse_module_states &s) : states(s) {}
 	virtual ~fuse_states() {};
