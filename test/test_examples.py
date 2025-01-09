@@ -193,7 +193,7 @@ def test_passthrough(short_tmpdir, name, debug, output_checker, writeback):
         umount(mount_process, mnt_dir)
 
 @pytest.mark.parametrize("name", ('passthrough_hp', 'passthrough_fs'))
-@pytest.mark.parametrize("mode", ('', 'debug', 'wbcache', 'nocache'))
+@pytest.mark.parametrize("mode", ('', 'debug', 'wbcache', 'nopassthrough', 'nocache'))
 def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
