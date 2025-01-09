@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 
 #ifndef ALLPERMS
@@ -858,7 +859,15 @@ fail:
 	return -1;
 }
 
-#ifdef HAVE_COPY_FILE_RANGE
+#ifndef HAVE_COPY_FILE_RANGE
+static loff_t copy_file_range(int fd_in, loff_t *off_in, int fd_out,
+			      loff_t *off_out, size_t len, unsigned int flags)
+{
+	return syscall(__NR_copy_file_range, fd_in, off_in, fd_out,
+			off_out, len, flags);
+}
+#endif
+
 static int test_copy_file_range(void)
 {
 	const char *data = testdata;
@@ -947,12 +956,6 @@ static int test_copy_file_range(void)
 	success();
 	return 0;
 }
-#else
-static int test_copy_file_range(void)
-{
-	return 0;
-}
-#endif
 
 static int test_utime(void)
 {

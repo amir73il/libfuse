@@ -220,6 +220,9 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         elif mode == 'nocache':
             # Piggyback --nokeepfd and no redirect on nocache mode
             keepfd = False
+        else:
+            # Piggyback redirect=copy on read cache mode
+            redirect = "copy"
 
         if redirect:
             config_file = 'cachegwfs.config'
