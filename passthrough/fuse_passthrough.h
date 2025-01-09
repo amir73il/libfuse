@@ -42,6 +42,7 @@ struct fuse_passthrough_opts {
 	//   0: keeps only file handles and fails if not supported
 	// < 0: keeps open fds if file handles are not supported
 	int keep_fd{-1};
+	bool connected_fd{false};
 	unsigned int max_threads{0};
 	unsigned int max_idle_threads{0};
 };
@@ -59,6 +60,8 @@ struct fh_encoder {
 	virtual int ino_size() const = 0;
 	virtual ino_t ino(struct file_handle &fh) const = 0;
 	virtual uint32_t gen(struct file_handle &fh) const = 0;
+	virtual ino_t parent_ino(struct file_handle &fh) const = 0;
+	virtual uint32_t parent_gen(struct file_handle &fh) const = 0;
 	virtual ino_t nodeid(struct file_handle &fh) const = 0;
 	virtual void encode(struct file_handle &fh, ino_t ino, uint32_t gen) const = 0;
 	virtual ~fh_encoder() {}
