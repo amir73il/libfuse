@@ -149,6 +149,7 @@ enum index_op {
 
 struct fill_index_ctx {
 	ino_t pino;
+	index_op op;
 };
 
 
@@ -195,12 +196,22 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 	auto index_path = fid_index_path(idx->fid.fh);
 	struct stat stat;
 	auto ret = lstat(index_path.c_str(), &stat);
-	if (ret == -1)
-		return;
+	auto rw = (ctx->op != OP_RO);
+	if (ret == -1) {
+		if (errno != ENOENT || !rw)
+			return;
+
+		ret = mkdir(index_path.c_str(), 0755);
+		if (ret == -1 && errno != EEXIST)
+			return;
+	} else {
+		rw = false;
+	}
 
 	if (nfyfs.debug())
 		cerr << "DEBUG: directory inode " << inode.ino()
-			<< " is indexed" << endl;
+			<< (rw ? " was now" : " is already")
+			<< " indexed" << endl;
 
 	idx->set(IDX_SELF);
 	return;
@@ -270,10 +281,11 @@ static bool fill_index_state(const fuse_inode &inode,
 	return init;
 }
 
-static IndexState *get_index_state(ino_t ino, ino_t pino = 0)
+static IndexState *get_index_state(ino_t ino, index_op op, ino_t pino = 0)
 {
 	fill_index_ctx ctx = {
 		.pino = pino,
+		.op = op,
 	};
 
 	fuse_state_t state;
@@ -302,7 +314,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 
 	auto &inode = at.inode();
 	auto ino = inode.nodeid();
-	auto idx = get_index_state(ino);
+	auto idx = get_index_state(ino, op);
 	if (!idx)
 		return false;
 
@@ -349,7 +361,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 
 	auto &parent = at.inode();
 	auto pino = parent.nodeid();
-	auto pidx = get_index_state(pino);
+	auto pidx = get_index_state(pino, OP_RO);
 	if (!pidx) {
 		cerr << "ERROR: no parent index state. ino=" << pino << endl;
 		// If we fail lookup now, we would need to call forget() API...
@@ -362,7 +374,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 			<< " indexed state " << pidx->bits() << endl;
 
 	// Inode state is created on lookup() and may be updated later
-	auto idx = get_index_state(e->ino, pino);
+	auto idx = get_index_state(e->ino, OP_RO, pino);
 	if (!idx) {
 		cerr << "ERROR: no index state. ino=" << e->ino << endl;
 		// If we fail lookup now, we would need to call forget() API...
