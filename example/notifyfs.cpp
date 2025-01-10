@@ -65,6 +65,7 @@ using namespace std;
 struct NotifyFs : public fuse_passthrough_module {
 	string index_prefix;
 	chrono::nanoseconds index_btime{0ns};
+	bool index_by_src_ino{true};
 
 	NotifyFs() : fuse_passthrough_module("notifyfs") {}
 
@@ -102,13 +103,15 @@ struct fid64 {
 enum {
 	_IDX_PARENT,	// All ancestors are indexed
 	_IDX_SELF,	// Directory inode itself is indexed
+	_IDX_MOVED,	// Directory was moved
 };
 
 #define IDX_INIT	0U
 #define IDX_PARENT	(1U << _IDX_PARENT)
 #define IDX_SELF	(1U << _IDX_SELF)
+#define IDX_MOVED	(1U << _IDX_MOVED)
 #define IDX_PATH	(IDX_PARENT | IDX_SELF)
-#define IDX_MASK	(IDX_PATH)
+#define IDX_MASK	(IDX_PATH  | IDX_MOVED)
 
 // True if all bits in the mask are set
 #define IDX_TEST(bits, mask) \
@@ -230,17 +233,49 @@ static bool dir_is_new(int dirfd, ino_t ino)
 	return true;
 }
 
+// The opaque xattr is meaningless on overlayfs index entries.
+// We use it as an arbitrary mark of a moved directory
+#define OVL_XATTR_OPAQUE "trusted.overlay.opaque"
+
+// Check if inode was marked as moved
+static bool check_index_moved(const string &index_path, bool &rw)
+{
+	auto res = lgetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, NULL, 0);
+	if (res > 0)
+		return true;
+
+	if (lsetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, "y", 1, 0))
+		return false;
+
+	rw = true;
+	return true;
+}
+
 static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 			      fill_index_ctx *ctx)
 {
-	if (idx->test(IDX_SELF))
+	auto move = (ctx->op == OP_MOVE);
+	if (move && idx->test(IDX_MOVED))
 		return;
 
-	// Treat all non-dir and new directories as indexed, becauses we
-	// only need to trigger indexing for directories that existed
-	// at the time that index was created.
+	if (!move && idx->test(IDX_SELF))
+		return;
+
+	// We index directories by FUSE nodeid, so we can get state of parent
+	// in all the operations.  If FUSE ino is the same as source ino, we can
+	// also get state of subdir when we have it's source ino for indexing
+	// moved directories.  Otherwise, we need to disable directory move.
+	if (move && nfyfs.index_by_src_ino && inode.nodeid() != inode.ino()) {
+		nfyfs.index_by_src_ino = false;
+		if (nfyfs.debug())
+			cerr << "DEBUG: disabled directory move" << endl;
+	}
+
+	// Treat all non-dir and new directories as indexed and moved,
+	// becauses we only need to trigger indexing for directories that
+	// existed at the time that index was created.
 	if (!inode.is_dir() || dir_is_new(inode.get_fd(), inode.ino())) {
-		idx->set(IDX_SELF);
+		idx->set(IDX_SELF | IDX_MOVED);
 		return;
 	}
 
@@ -259,10 +294,13 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 		rw = false;
 	}
 
+	if (move && check_index_moved(index_path, rw))
+		idx->set(IDX_MOVED);
+
 	if (nfyfs.debug())
 		cerr << "DEBUG: directory inode " << inode.ino()
 			<< (rw ? " was now" : " is already")
-			<< " indexed" << endl;
+			<< (move ? " marked moved" : " indexed") << endl;
 
 	idx->set(IDX_SELF);
 	return;
@@ -431,7 +469,32 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 
 	auto &inode = at.inode();
 	auto ino = inode.nodeid();
-	auto idx = get_index_state(ino, op);
+	ino_t pino = 0;
+	auto move = (op == OP_MOVE);
+
+	if (move) {
+		struct stat st;
+		if (fstatat(at.dirfd(), at.path(), &st, at.flags()))
+			return false;
+
+		// Even if we cannot indexed moved directory, we can allow
+		// move of directories newer than index
+		if (!S_ISDIR(st.st_mode) ||
+		    dir_is_new(at.dirfd(), st.st_ino))
+			return true;
+
+		// We need to check the index of a moved directory
+		// and we can only do that if inodes are indexed by
+		// source st_ino
+		if (!nfyfs.index_by_src_ino)
+			return false;
+
+		// Index the moved subdir
+		pino = ino;
+		ino = st.st_ino;
+	}
+
+	auto idx = get_index_state(ino, op, pino);
 	if (!idx)
 		return false;
 
@@ -444,6 +507,10 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 			<< " inode " << ino
 			<< " index state " << idx->bits() << endl;
 
+	// Do not allow move of directory unless it is marked as moved in index
+	if (move && !idx->test(IDX_MOVED))
+		return false;
+
 	// Do not allow modifications to inode unless all path elements
 	// (all parent directories and self) are indexed or newer than index.
 	return !rw || idx->test(IDX_PATH);
@@ -451,6 +518,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 
 #define index_ro_path_at(at) index_path_at(at, OP_RO, EPERM)
 #define index_rw_path_at(at) index_path_at(at, OP_RW, EPERM)
+#define index_move_path_at(at) index_path_at(at, OP_MOVE, EXDEV)
 #define index_path_at(at, op, err)			\
 	if (!__index_path_at((at), (op), __func__)) {	\
 		errno = (err);				\
@@ -600,6 +668,9 @@ static int nfyfs_rename(const fuse_path_at &oldat, const fuse_path_at &newat,
 {
 	index_rw_path_at(oldat);
 	index_rw_path_at(newat);
+	// Mark directory moved or return EXDEV error
+	// to let userspace fall back to recursive move
+	index_move_path_at(oldat);
 	return next_op(rename)(oldat, newat, flags);
 }
 
