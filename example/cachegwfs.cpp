@@ -84,6 +84,7 @@ enum op {
 	OP_UNLINK,
 	OP_SYMLINK,
 	// redirect for specific xattr name prefixes
+	OP_LISTXATTR,
 	OP_GETXATTR,
 	OP_SETXATTR,
 	// redirect fd opened in open() and used in copy_file_range() if needed
@@ -112,6 +113,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_RENAME, "rename" },
 	{ OP_UNLINK, "unlink" },
 	{ OP_SYMLINK, "symlink" },
+	{ OP_LISTXATTR, "listxattr" },
 	{ OP_GETXATTR, "getxattr" },
 	{ OP_SETXATTR, "setxattr" },
 	{ OP_COPY, "copy" },
@@ -787,7 +789,7 @@ static int cgwfs_getxattr(const fuse_path_at &in, const char *name, char *value,
 
 static int cgwfs_listxattr(const fuse_path_at &in, char *value, size_t size)
 {
-	auto out = get_fd_path_op(in, OP_GETXATTR);
+	auto out = get_fd_path_op(in, OP_LISTXATTR);
 	return next_op(listxattr)(out, value, size);
 }
 
