@@ -67,6 +67,7 @@ enum op {
 	OP_GETATTR,
 	OP_OPEN_RO,
 	OP_OPEN_RW,
+	OP_RELEASE,
 	OP_OPENDIR,
 	OP_STATFS,
 	OP_CHMOD,
@@ -98,6 +99,7 @@ const map<enum op, const char *> op_names = {
 	{ OP_GETATTR, "getattr" },
 	{ OP_OPEN_RO, "open_ro" },
 	{ OP_OPEN_RW, "open_rw" },
+	{ OP_RELEASE, "release" },
 	{ OP_OPENDIR, "opendir" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CHMOD, "chmod" },
@@ -741,10 +743,11 @@ static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 	return finish_open(out, fi, op);
 }
 
-static int cgwfs_release(const fuse_path_at &, fuse_file_info *fi)
+static int cgwfs_release(const fuse_path_at &in, fuse_file_info *fi)
 {
+	auto out = get_fd_path_op(in, OP_RELEASE);
 	close_file_redirect_fd(fi);
-	return 0;
+	return next_op(release)(out, fi);
 }
 
 static int cgwfs_statfs(const fuse_path_at &in, struct statvfs *stbuf)
