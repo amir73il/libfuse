@@ -156,6 +156,7 @@ enum index_op {
 	OP_RO,
 	OP_RW,
 	OP_MOVE,
+	OP_PARENT,
 };
 
 struct fill_index_ctx {
@@ -238,7 +239,7 @@ static bool dir_is_new(int dirfd, ino_t ino)
 #define OVL_XATTR_OPAQUE "trusted.overlay.opaque"
 
 // Check if inode was marked as moved
-static bool check_index_moved(const string &index_path, bool &rw)
+static bool check_index_moved(const string &index_path, bool &created)
 {
 	auto res = lgetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, NULL, 0);
 	if (res > 0)
@@ -247,18 +248,38 @@ static bool check_index_moved(const string &index_path, bool &rw)
 	if (lsetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, "y", 1, 0))
 		return false;
 
-	rw = true;
+	created = true;
 	return true;
+}
+
+// Check if index was marked as modified
+static bool check_index_modified(const struct stat &st)
+{
+	// atime > mtime means no modification since last check
+	if (st.st_atime > st.st_mtime)
+		return false;
+
+	// mtime > atime means modified since last check
+	if (st.st_mtime > st.st_atime)
+		return true;
+
+	// mkdir and touch set mtime = atime, so atime == mtime is modified
+	return st.st_mtim.tv_nsec >= st.st_atim.tv_nsec;
 }
 
 static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 			      fill_index_ctx *ctx)
 {
-	auto move = (ctx->op == OP_MOVE);
-	if (move && idx->test(IDX_MOVED))
+	auto const isdir = inode.is_dir();
+	// Create index if does not exist for all parent dirs before change
+	// Update index entry timestamp for the direct parent only before change
+	auto const create = isdir && (ctx->op != OP_RO);
+	auto const update = create && (ctx->op != OP_PARENT);
+	auto const move = (ctx->op == OP_MOVE);
+	if (move && !update && idx->test(IDX_MOVED))
 		return;
 
-	if (!move && idx->test(IDX_SELF))
+	if (!move && !update && idx->test(IDX_SELF))
 		return;
 
 	// We index directories by FUSE nodeid, so we can get state of parent
@@ -274,7 +295,7 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 	// Treat all non-dir and new directories as indexed and moved,
 	// becauses we only need to trigger indexing for directories that
 	// existed at the time that index was created.
-	if (!inode.is_dir() || dir_is_new(inode.get_fd(), inode.ino())) {
+	if (!isdir || dir_is_new(inode.get_fd(), inode.ino())) {
 		idx->set(IDX_SELF | IDX_MOVED);
 		return;
 	}
@@ -282,24 +303,33 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 	auto index_path = fid_index_path(idx->fid.fh);
 	struct stat stat;
 	auto ret = lstat(index_path.c_str(), &stat);
-	auto rw = (ctx->op != OP_RO);
+	auto created = false;
+	auto updated = false;
 	if (ret == -1) {
-		if (errno != ENOENT || !rw)
+		if (errno != ENOENT || !create)
 			return;
 
 		ret = mkdir(index_path.c_str(), 0755);
+		created = (ret == 0);
 		if (ret == -1 && errno != EEXIST)
 			return;
-	} else {
-		rw = false;
+	} else if (update && !check_index_modified(stat)) {
+		// Update index timestamp if it was already observed (atime > mtime)
+		ret = utimensat(AT_FDCWD, index_path.c_str(), NULL, AT_SYMLINK_NOFOLLOW);
+		updated = (ret == 0);
+	} else if (!move && idx->test(IDX_SELF)) {
+		// Reduce debug noise - if index was not created/updated and dir
+		// was already cached as indexed, do not print debug message
+		return;
 	}
 
-	if (move && check_index_moved(index_path, rw))
+	if (move && !idx->test(IDX_MOVED) && check_index_moved(index_path, created))
 		idx->set(IDX_MOVED);
 
 	if (nfyfs.debug())
 		cerr << "DEBUG: directory inode " << inode.ino()
-			<< (rw ? " was now" : " is already")
+			<< (created ? " was now" :
+			   (updated ? " once again" : " is already"))
 			<< (move ? " marked moved" : " indexed") << endl;
 
 	idx->set(IDX_SELF);
@@ -432,7 +462,7 @@ static bool index_parents(IndexState *idx)
 			return false;
 		}
 
-		pidx = get_index_state(parent, OP_RW);
+		pidx = get_index_state(parent, OP_PARENT);
 		if (!pidx || pidx->parent == parent || !pidx->test(IDX_SELF)) {
 			pidx = NULL;
 			break;
