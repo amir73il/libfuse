@@ -320,7 +320,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 	}
 
 	int n = 0;
-	char linkname[PATH_MAX];
+	char linkname[PATH_MAX+1];
 	bool redirect = should_redirect_fd(dirfd, in.proc_path(), op);
 	if (redirect)
 		n = readlink(in.proc_path(), linkname, PATH_MAX);
@@ -344,8 +344,9 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 		// Return redirected path
 		return fuse_path_at_cwd(in, outpath.c_str());
 	} else {
-		if (redirect && prefix) {
+		if (redirect && prefix && n > 0) {
 			// We need to redirect, but we don't know where to
+			linkname[n] = 0;
 			cerr << "ERROR: redirect " << op_name(op) << "(" << name << "): "
 				<< linkname << " not under " << fs.opts.source << endl;
 		}

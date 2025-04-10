@@ -548,7 +548,7 @@ bool fuse_path_at::is_connected() const
 // Unless path is relative to CWD also prints the dirfd symlink path.
 void fuse_path_at::print_fd_path(const char *caller) const
 {
-	char linkname[PATH_MAX];
+	char linkname[PATH_MAX+1];
 	int n = 0;
 
 	if (dirfd() != AT_FDCWD) {
