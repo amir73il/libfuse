@@ -67,7 +67,6 @@ enum op {
 	OP_GETATTR,
 	OP_OPEN_RO,
 	OP_OPEN_RW,
-	OP_RELEASE,
 	OP_OPENDIR,
 	OP_STATFS,
 	OP_CHMOD,
@@ -99,7 +98,6 @@ const map<enum op, const char *> op_names = {
 	{ OP_GETATTR, "getattr" },
 	{ OP_OPEN_RO, "open_ro" },
 	{ OP_OPEN_RW, "open_rw" },
-	{ OP_RELEASE, "release" },
 	{ OP_OPENDIR, "opendir" },
 	{ OP_STATFS, "statfs" },
 	{ OP_CHMOD, "chmod" },
@@ -497,9 +495,10 @@ static int open_redirect_fd(const fuse_path_at &in, fuse_file_info *fi, int flag
 
 static void close_file_redirect_fd(fuse_file_info *fi)
 {
+	auto fd = get_file_fd(fi);
 	auto rfd = get_file_redirect_fd(fi);
 
-	if (rfd >= 0) {
+	if (rfd >= 0 && rfd != fd) {
 		if (fs.debug()) {
 			cerr << "DEBUG: close redirect_fd=" << rfd
 				<< ", fd=" << get_file_fd(fi) << endl;
@@ -746,9 +745,8 @@ static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 
 static int cgwfs_release(const fuse_path_at &in, fuse_file_info *fi)
 {
-	auto out = get_fd_path_op(in, OP_RELEASE);
 	close_file_redirect_fd(fi);
-	return next_op(release)(out, fi);
+	return next_op(release)(in, fi);
 }
 
 static int cgwfs_statfs(const fuse_path_at &in, struct statvfs *stbuf)
