@@ -658,8 +658,11 @@ retry:
 		ino32 = (encoder->ino_size() == sizeof(uint32_t));
 		// bulkstat support is an indication of xfs
 		bulkstat = xfs_bulkstat_gen(src_ino);
-		if (!bulkstat && errno == EPERM)
-			errx(1, "ERROR: insufficient privileges");
+		if (!bulkstat && errno == EPERM) {
+			fs.opts.keep_fd = 1;
+			cout << "INFO: insufficient privileges to decode file handles"
+				<< " - keeping O_PATH fds" << endl;
+		}
 		cout << "INFO: source filesystem looks like "
 			<< ((bulkstat || !ino32) ? "xfs" : "ext4")
 			<< " -o inode" << (ino32 ? "32" : "64") << endl;
