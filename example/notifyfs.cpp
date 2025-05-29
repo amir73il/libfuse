@@ -834,9 +834,20 @@ static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 	return next_op(open)(at, fi);
 }
 
+#define XATTR_INDEX_PATH "user.notifyfs.index_path"
+
 static int nfyfs_setxattr(const fuse_path_at &at, const char *name,
 			  const char *value, size_t size, int flags)
 {
+	static string xattr_index_path = XATTR_INDEX_PATH;
+	if (xattr_index_path == name) {
+		if (!nfyfs.set_index_path(string(value, size))) {
+			errno = EPERM;
+			return -1;
+		}
+		return 0;
+	}
+
 	auto index = nfyfs.index();
 	index_rw_path_at(index, at);
 	return next_op(setxattr)(at, name, value, size, flags);
