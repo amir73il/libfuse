@@ -120,6 +120,8 @@ enum {
 // True if all bits in the mask are set
 #define IDX_TEST(bits, mask) \
 	(((bits) & (mask)) == (mask))
+#define IDX_FLAGS(bits) \
+	((bits) & IDX_MASK)
 #define IDX_VALID(bits) \
 	(!((bits) & ~IDX_MASK))
 
@@ -137,17 +139,23 @@ struct IndexState {
 			memcpy(fid.buf, fh.f_handle, fh.handle_bytes);
 		else
 			fid.fh.handle_bytes = 0;
-		set(IDX_INIT);
+		reset();
 	}
 
-	bool set(unsigned mask) {
-		return IDX_VALID(indexed.fetch_or(mask, memory_order_relaxed));
+	void reset() {
+		indexed.store(IDX_INIT, memory_order_relaxed);
+	}
+	void set(unsigned flags) {
+		// Set new state flags without clearing existing flags
+		indexed.fetch_or(flags, memory_order_relaxed);
 	}
 	bool test(unsigned mask) {
-		return IDX_TEST(indexed.load(memory_order_relaxed), mask);
+		auto v = indexed.load(memory_order_relaxed);
+		return IDX_VALID(v) && IDX_TEST(v, mask);
 	}
-	unsigned bits() {
-		return indexed.load(memory_order_relaxed);
+	unsigned get() {
+		auto v = indexed.load(memory_order_relaxed);
+		return IDX_VALID(v) ? IDX_FLAGS(v) : IDX_INIT;
 	}
 
 private:
@@ -578,10 +586,12 @@ static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 	if (rw && !idx->test(IDX_PARENT) && index->index_parents(idx))
 		idx->set(IDX_PARENT);
 
-	if (nfyfs.debug())
+	if (nfyfs.debug()) {
 		cerr << "DEBUG: " << caller << "(" << at.path() << ")"
 			<< " inode " << ino
-			<< " index state " << idx->bits() << endl;
+			<< " index state 0x" << hex << noshowbase
+			<< idx->get() << dec << endl;
+	}
 
 	// Do not allow move of directory unless it is marked as moved in index
 	if (move && !idx->test(IDX_MOVED))
@@ -635,9 +645,11 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	}
 
 	auto parent_indexed = pidx->test(IDX_PATH);
-	if (nfyfs.debug())
+	if (nfyfs.debug()) {
 		cerr << "DEBUG: parent " << pino
-			<< " indexed state " << pidx->bits() << endl;
+			<< " indexed state 0x" << hex << noshowbase
+			<< pidx->get() << dec << endl;
+	}
 
 	// Inode state is created on lookup() and may be updated later
 	// Lookup of same inode from a different path (e.g. hardlink)
@@ -655,7 +667,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	} else if (idx->test(IDX_PARENT)) {
 		// This can happen if ancestor was renamed in the source
 		// from an indexed path without indexing the new path
-		idx->set(IDX_INIT);
+		idx->reset();
 		if (nfyfs.debug())
 			cerr << "ERROR: resetting inconsistent indexed state"
 				<< " parent=" << pino
