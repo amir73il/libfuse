@@ -193,7 +193,7 @@ static string fid_index_path(const file_handle &fid)
 }
 
 // Get immutable creation time of directory from filesystem (e.g. xfs, ext4)
-static chrono::nanoseconds get_dir_btime_nsec(int dirfd, const char *path)
+static pair<chrono::nanoseconds, ino_t> get_dir_btime_ino(int dirfd, const char *path)
 {
 	chrono::nanoseconds nsec{0ns};
 	struct statx stx = {};
@@ -202,28 +202,28 @@ static chrono::nanoseconds get_dir_btime_nsec(int dirfd, const char *path)
 		  STATX_MODE | STATX_BTIME, &stx)) {
 		if (nfyfs.debug())
 			cerr << "ERROR: statx() failed" << endl;
-		return nsec;
+		return {nsec, 0};
 	}
 
 	if (S_ISDIR(stx.stx_mode) && (stx.stx_mask & STATX_BTIME)) {
 		// Pre 1970 btime not supported
 		if (stx.stx_btime.tv_sec < 0)
-			return nsec;
+			return {nsec, 0};
 
 		nsec = chrono::seconds{stx.stx_btime.tv_sec} +
 			chrono::nanoseconds{stx.stx_btime.tv_nsec};
 	}
 
-	return nsec;
+	return {nsec, stx.stx_ino};
 }
 
 // Check if directory was created after index dir
-static bool dir_is_new(int dirfd, ino_t ino)
+static bool dir_is_new(int dirfd, const char *path = "")
 {
 	if (!nfyfs.btime_supported())
 		return false;
 
-	auto btime = get_dir_btime_nsec(dirfd, "");
+	auto [btime, ino] = get_dir_btime_ino(dirfd, path);
 	if (btime <= nfyfs.index_btime)
 		return false;
 
@@ -295,7 +295,7 @@ static void inode_check_index(const fuse_inode &inode, IndexState *idx,
 	// Treat all non-dir and new directories as indexed and moved,
 	// becauses we only need to trigger indexing for directories that
 	// existed at the time that index was created.
-	if (!isdir || dir_is_new(inode.get_fd(), inode.ino())) {
+	if (!isdir || dir_is_new(inode.get_fd())) {
 		idx->set(IDX_SELF | IDX_MOVED);
 		return;
 	}
@@ -510,7 +510,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 		// Even if we cannot indexed moved directory, we can allow
 		// move of directories newer than index
 		if (!S_ISDIR(st.st_mode) ||
-		    dir_is_new(at.dirfd(), st.st_ino))
+		    dir_is_new(at.dirfd(), at.path()))
 			return true;
 
 		// We need to check the index of a moved directory
@@ -763,7 +763,7 @@ void nfyfs_init(fuse_passthrough_opts &opts, string index_path, bool index_all)
 	nfyfs.opts = opts;
 	nfyfs_assign_operations(nfyfs.oper);
 	nfyfs.index_prefix = index_path + '/';
-	nfyfs.index_btime = get_dir_btime_nsec(AT_FDCWD, index_path.c_str());
+	tie(nfyfs.index_btime, ignore) = get_dir_btime_ino(AT_FDCWD, index_path.c_str());
 	if (!nfyfs.btime_supported()) {
 		cout << "INFO: creation time not supported by filesystem on "
 			<< index_path << endl;
