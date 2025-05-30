@@ -44,6 +44,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <list>
 #include <mutex>
 #include <fstream>
@@ -60,23 +61,26 @@
 #include "statx.h"
 
 using namespace std;
+namespace fs = std::filesystem;
 
+
+class Index;
 
 struct NotifyFs : public fuse_passthrough_module {
-	string index_prefix;
-	chrono::nanoseconds index_btime{0ns};
+	bool index_all{false};
 	bool index_by_src_ino{true};
 
 	NotifyFs() : fuse_passthrough_module("notifyfs") {}
 
-	// Filesystem is indexed by fhandles using a change tracking snapshot
-	// index_prefix is not a directory, it's a template of a directory entry name.
-	bool is_indexed() {
-		return !index_prefix.empty();
+	bool set_index_path(const string &index_path);
+
+	shared_ptr<Index> index() {
+		return atomic_load(&_index);
 	}
-	bool btime_supported() {
-		return index_btime != 0ns;
-	}
+
+private:
+	mutex _index_lock;
+	shared_ptr<Index> _index;
 };
 static NotifyFs nfyfs{};
 
@@ -160,10 +164,44 @@ enum index_op {
 };
 
 struct fill_index_ctx {
+	Index *index;
 	ino_t pino;
 	index_op op;
 };
 
+
+class Index {
+public:
+	Index() {}
+	Index(const string &path, chrono::nanoseconds btime, unsigned id) :
+		_index_dir_path(path), _index_dir_btime(btime), _index_id(id) {}
+
+	bool dir_is_new(int dirfd, const char *path = "") const;
+	string fid_index_path(const file_handle &fid) const;
+	bool check_index_moved(const string &index_path, bool &created);
+	void inode_check_index(const fuse_inode &inode, IndexState *idx,
+			       fill_index_ctx *ctx);
+	IndexState *get_index_state(ino_t ino, index_op op, ino_t pino = 0);
+	bool index_parents(IndexState *idx);
+
+	bool is_valid() const {
+		return !_index_dir_path.empty();
+	}
+	bool btime_supported() const {
+		return _index_dir_btime != 0ns;
+	}
+	string dir_path() const {
+		return _index_dir_path;
+	}
+	unsigned id() const {
+		return _index_id;
+	}
+
+private:
+	string _index_dir_path;
+	chrono::nanoseconds _index_dir_btime{0ns};
+	unsigned _index_id{0};
+};
 
 static string buf2hex(const unsigned char *buf, unsigned int size)
 {
@@ -187,9 +225,9 @@ static string buf2hex(const unsigned char *buf, unsigned int size)
 	return result;
 }
 
-static string fid_index_path(const file_handle &fid)
+string Index::fid_index_path(const file_handle &fid) const
 {
-	return nfyfs.index_prefix + buf2hex(fid.f_handle, fid.handle_bytes);
+	return _index_dir_path + '/' + buf2hex(fid.f_handle, fid.handle_bytes);
 }
 
 // Get immutable creation time of directory from filesystem (e.g. xfs, ext4)
@@ -218,13 +256,13 @@ static pair<chrono::nanoseconds, ino_t> get_dir_btime_ino(int dirfd, const char 
 }
 
 // Check if directory was created after index dir
-static bool dir_is_new(int dirfd, const char *path = "")
+bool Index::dir_is_new(int dirfd, const char *path) const
 {
-	if (!nfyfs.btime_supported())
+	if (!btime_supported())
 		return false;
 
 	auto [btime, ino] = get_dir_btime_ino(dirfd, path);
-	if (btime <= nfyfs.index_btime)
+	if (btime <= _index_dir_btime)
 		return false;
 
 	if (nfyfs.debug())
@@ -239,7 +277,7 @@ static bool dir_is_new(int dirfd, const char *path = "")
 #define OVL_XATTR_OPAQUE "trusted.overlay.opaque"
 
 // Check if inode was marked as moved
-static bool check_index_moved(const string &index_path, bool &created)
+bool Index::check_index_moved(const string &index_path, bool &created)
 {
 	auto res = lgetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, NULL, 0);
 	if (res > 0)
@@ -267,7 +305,7 @@ static bool check_index_modified(const struct stat &st)
 	return st.st_mtim.tv_nsec >= st.st_atim.tv_nsec;
 }
 
-static void inode_check_index(const fuse_inode &inode, IndexState *idx,
+void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 			      fill_index_ctx *ctx)
 {
 	auto const isdir = inode.is_dir();
@@ -405,7 +443,7 @@ static bool fill_index_state(const fuse_inode &inode,
 			idx->reset(fid.fh, pino);
 	}
 
-	inode_check_index(inode, idx, ctx);
+	ctx->index->inode_check_index(inode, idx, ctx);
 
 	return init;
 }
@@ -415,9 +453,10 @@ static bool fill_index_state(const fuse_inode &inode,
 //
 // @pino 0 means get existing inode state with any idx->parent.
 // Otherwise, find or create a state with @pino as idx->parent.
-static IndexState *get_index_state(ino_t ino, index_op op, ino_t pino = 0)
+IndexState *Index::get_index_state(ino_t ino, index_op op, ino_t pino)
 {
 	fill_index_ctx ctx = {
+		.index = this,
 		.pino = pino,
 		.op = op,
 	};
@@ -441,7 +480,7 @@ static IndexState *get_index_state(ino_t ino, index_op op, ino_t pino = 0)
 
 #define MAX_PATH_DEPTH 100
 
-static bool index_parents(IndexState *idx)
+bool Index::index_parents(IndexState *idx)
 {
 	auto pidx = idx;
 	auto parent = idx->parent;
@@ -491,10 +530,10 @@ static bool index_parents(IndexState *idx)
 }
 
 // Check if dir and parents are indexed in change tracking snapshot
-static bool __index_path_at(const fuse_path_at &at, index_op op,
+static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 			    const char *caller)
 {
-	if (!nfyfs.is_indexed())
+	if (!index || !index->is_valid())
 		return true;
 
 	auto &inode = at.inode();
@@ -510,7 +549,7 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 		// Even if we cannot indexed moved directory, we can allow
 		// move of directories newer than index
 		if (!S_ISDIR(st.st_mode) ||
-		    dir_is_new(at.dirfd(), at.path()))
+		    index->dir_is_new(at.dirfd(), at.path()))
 			return true;
 
 		// We need to check the index of a moved directory
@@ -524,12 +563,12 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 		ino = st.st_ino;
 	}
 
-	auto idx = get_index_state(ino, op, pino);
+	auto idx = index->get_index_state(ino, op, pino);
 	if (!idx)
 		return false;
 
 	auto rw = (op != OP_RO);
-	if (rw && !idx->test(IDX_PARENT) && index_parents(idx))
+	if (rw && !idx->test(IDX_PARENT) && index->index_parents(idx))
 		idx->set(IDX_PARENT);
 
 	if (nfyfs.debug())
@@ -546,11 +585,11 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 	return !rw || idx->test(IDX_PATH);
 }
 
-#define index_ro_path_at(at) index_path_at(at, OP_RO, EPERM)
-#define index_rw_path_at(at) index_path_at(at, OP_RW, EPERM)
-#define index_move_path_at(at) index_path_at(at, OP_MOVE, EXDEV)
-#define index_path_at(at, op, err)			\
-	if (!__index_path_at((at), (op), __func__)) {	\
+#define index_ro_path_at(index, at) index_path_at(index, at, OP_RO, EPERM)
+#define index_rw_path_at(index, at) index_path_at(index, at, OP_RW, EPERM)
+#define index_move_path_at(index, at) index_path_at(index, at, OP_MOVE, EXDEV)
+#define index_path_at(index, at, op, err)			\
+	if (!__index_path_at((index).get(), (at), (op), __func__)) {	\
 		errno = (err);				\
 		return -1;				\
 	}
@@ -560,12 +599,13 @@ static bool __index_path_at(const fuse_path_at &at, index_op op,
 //
 static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 {
-	index_ro_path_at(at);
+	auto index = nfyfs.index();
+	index_ro_path_at(index, at);
 	auto ret = next_op(lookup)(at, e);
 	if (ret)
 		return ret;
 
-	if (!nfyfs.is_indexed())
+	if (!index || !index->is_valid())
 		return 0;
 
 	// Only initialize state on forward path+name lookup.
@@ -580,7 +620,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 
 	auto &parent = at.inode();
 	auto pino = parent.nodeid();
-	auto pidx = get_index_state(pino, OP_RO);
+	auto pidx = index->get_index_state(pino, OP_RO);
 	if (!pidx) {
 		cerr << "ERROR: no parent index state. ino=" << pino << endl;
 		// If we fail lookup now, we would need to call forget() API...
@@ -595,7 +635,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	// Inode state is created on lookup() and may be updated later
 	// Lookup of same inode from a different path (e.g. hardlink)
 	// will reset the inode state to that of the new path.
-	auto idx = get_index_state(e->ino, OP_RO, pino);
+	auto idx = index->get_index_state(e->ino, OP_RO, pino);
 	if (!idx) {
 		cerr << "ERROR: no index state. ino=" << e->ino << endl;
 		// If we fail lookup now, we would need to call forget() API...
@@ -638,101 +678,116 @@ static int nfyfs_forget(const fuse_path_at &at)
 
 static int nfyfs_chmod(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(chmod)(at, mode, fi);
 }
 
 static int nfyfs_chown(const fuse_path_at &at, uid_t uid, gid_t gid,
 		       fuse_file_info *fi)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(chown)(at, uid, gid, fi);
 }
 
 static int nfyfs_truncate(const fuse_path_at &at, off_t size, fuse_file_info *fi)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(truncate)(at, size, fi);
 }
 
 static int nfyfs_utimens(const fuse_path_at &at, const struct timespec tv[2],
 			 struct fuse_file_info *fi)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(utimens)(at, tv, fi);
 }
 
 static int nfyfs_mkdir(const fuse_path_at &at, mode_t mode)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(mkdir)(at, mode);
 }
 
 static int nfyfs_symlink(const char *link, const fuse_path_at &at)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(symlink)(link, at);
 }
 
 static int nfyfs_mknod(const fuse_path_at &at, mode_t mode, dev_t rdev)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(mknod)(at, mode, rdev);
 }
 
 static int nfyfs_link(const fuse_path_at &oldat, const fuse_path_at &newat)
 {
-	index_ro_path_at(oldat);
-	index_rw_path_at(newat);
+	auto index = nfyfs.index();
+	index_ro_path_at(index, oldat);
+	index_rw_path_at(index, newat);
 	return next_op(link)(oldat, newat);
 }
 
 static int nfyfs_rmdir(const fuse_path_at &at)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(rmdir)(at);
 }
 
 static int nfyfs_rename(const fuse_path_at &oldat, const fuse_path_at &newat,
 			unsigned int flags)
 {
-	index_rw_path_at(oldat);
-	index_rw_path_at(newat);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, oldat);
+	index_rw_path_at(index, newat);
 	// Mark directory moved or return EXDEV error
 	// to let userspace fall back to recursive move
-	index_move_path_at(oldat);
+	index_move_path_at(index, oldat);
 	return next_op(rename)(oldat, newat, flags);
 }
 
 static int nfyfs_unlink(const fuse_path_at &at)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(unlink)(at);
 }
 
 static int nfyfs_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(create)(at, mode, fi);
 }
 
 static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 {
 	index_op op = ((fi->flags & O_ACCMODE) == O_RDONLY) ? OP_RO : OP_RW;
-	index_path_at(at, op, EPERM);
+	auto index = nfyfs.index();
+	index_path_at(index, at, op, EPERM);
 	return next_op(open)(at, fi);
 }
 
 static int nfyfs_setxattr(const fuse_path_at &at, const char *name,
 			  const char *value, size_t size, int flags)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(setxattr)(at, name, value, size, flags);
 }
 
 static int nfyfs_removexattr(const fuse_path_at &at, const char *name)
 {
-	index_rw_path_at(at);
+	auto index = nfyfs.index();
+	index_rw_path_at(index, at);
 	return next_op(removexattr)(at, name);
 }
 
@@ -758,17 +813,58 @@ static void nfyfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.removexattr = nfyfs_removexattr;
 }
 
-void nfyfs_init(fuse_passthrough_opts &opts, string index_path, bool index_all)
+bool NotifyFs::set_index_path(const string &index_path)
+{
+	lock_guard<mutex> lock(_index_lock);
+	error_code ec;
+	auto canonical_path = fs::canonical(index_path, ec);
+	if (ec) {
+		cerr << "ERROR: canonical(" << index_path << ") failed: "
+			<< ec.message() << endl;
+		return false;
+	}
+
+	// Nothing to do when setting to same index path
+	auto path = canonical_path.string();
+	auto old_index = index();
+	if (old_index && old_index->dir_path() == path)
+		return true;
+
+	auto [btime, ino] = get_dir_btime_ino(AT_FDCWD, path.c_str());
+	if (index_all)
+		btime = 0ns;
+
+	unsigned id = old_index ? old_index->id() : 0;
+	if (++id == 0) {
+		// Do not allow wraparound of index id
+		cerr << "ERROR: index id wraparound." << endl;
+		return false;
+	}
+
+	try {
+		auto index = make_shared<Index>(path, btime, id);
+		cout << "INFO: Created index " << id << " on " << path << endl;
+		atomic_store(&_index, index);
+	} catch (const std::bad_alloc& e) {
+		cerr << "ERROR: Allocate new index failed: " << e.what() << endl;
+		return false;
+	}
+	return true;
+}
+
+void nfyfs_init(fuse_passthrough_opts &opts, const string &index_path, bool index_all)
 {
 	nfyfs.opts = opts;
 	nfyfs_assign_operations(nfyfs.oper);
-	nfyfs.index_prefix = index_path + '/';
-	tie(nfyfs.index_btime, ignore) = get_dir_btime_ino(AT_FDCWD, index_path.c_str());
-	if (!nfyfs.btime_supported()) {
+	nfyfs.index_all = index_all;
+	nfyfs.set_index_path(index_path);
+	auto index = nfyfs.index();
+	if (!index || !index->is_valid()) {
+		cerr << "ERROR: invalid index dir " << index_path << endl;
+	} else if (index->btime_supported()) {
 		cout << "INFO: creation time not supported by filesystem on "
 			<< index_path << endl;
 	} else if (index_all) {
-		nfyfs.index_btime = 0ns;
 		cout << "INFO: ignoring index creation time" << endl;
 	}
 }
