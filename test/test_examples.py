@@ -198,6 +198,7 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
     mnt_dir = str(short_tmpdir.mkdir('mnt'))
     src_dir = str(short_tmpdir.mkdir('src'))
     index_dir = str(short_tmpdir.mkdir('index'))
+    index_dir2 = str(short_tmpdir.mkdir('index2'))
     cache = (mode != 'nocache')
 
     cmdline = base_cmdline + \
@@ -242,9 +243,11 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         cmdline.append('--index_path=' + index_dir)
         cmdline.append('--debug')
         # All directories in the test are newer then index, so index also
-        # new directories in all redirect runs for better test coverage
-        if redirect:
-            cmdline.append('--index_all')
+        # new directories in all runs for better test coverage
+        cmdline.append('--index_all')
+        # nlink 2 means a directory with no subdir (i.e. no index entries)
+        assert os.stat(index_dir).st_nlink == 2
+        assert os.stat(index_dir2).st_nlink == 2
 
     cmdline.append('--foreground')
 
@@ -287,6 +290,14 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         if not redirect:
             tst_open_unlink(mnt_dir)
 
+        if name == 'notifyfs':
+            # Verify that changes were recorded in index dir
+            # and change index dir before test_syscalls
+            num_index_entries = os.stat(index_dir).st_nlink - 2
+            assert num_index_entries > 0
+            assert os.stat(index_dir2).st_nlink == 2
+            os.setxattr(mnt_dir, b'user.notifyfs.index_path', index_dir2.encode('utf-8'))
+
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we
         # can't use it.
@@ -299,6 +310,13 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
             if LooseVersion(platform.release()) >= '5.14':
                 syscall_test_cmd.append('-u')
             subprocess.check_call(syscall_test_cmd)
+
+            # Verify that index entries were recorded only in new index dir.
+            # test_syscalls created many subdirs so new index dir is expected
+            # to have more entries than the old index dir had.
+            if name == 'notifyfs':
+                assert num_index_entries == os.stat(index_dir).st_nlink - 2
+                assert num_index_entries < os.stat(index_dir2).st_nlink - 2
     except:
         cleanup(mount_process, mnt_dir)
         raise
