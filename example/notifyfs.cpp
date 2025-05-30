@@ -353,6 +353,12 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 	auto const create = isdir && (ctx->op != OP_RO);
 	auto const update = create && (ctx->op != OP_PARENT);
 	auto const move = (ctx->op == OP_MOVE);
+
+	// We treat root as "parent indexed" and root itself
+	// will be indxed on the first modification
+	if (inode.is_root())
+		idx->set(id(), IDX_PARENT);
+
 	if (move && !update && idx->test(id(), IDX_MOVED))
 		return;
 
@@ -447,11 +453,6 @@ static bool fill_index_state(const fuse_inode &inode,
 				<< " ino=" << ino << endl;
 			return false;
 		}
-
-		// We treat root as "parent indexed" and root itself
-		// will be indxed on the first modification
-		if (inode.is_root())
-			idx->set(ctx->index->id(), IDX_PARENT);
 
 		if (nfyfs.debug())
 			cerr << "DEBUG: fill_state=0x" << hex << idx
