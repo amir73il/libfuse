@@ -1316,6 +1316,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 				cerr << "DEBUG: lookup(): inode " << src_ino
 					<< " generation " << inode.gen()
 					<< " mismatch - reused inode." << endl;
+			inode.set_ftype(e->attr.st_mode);
 			inode.src_fh = xfs_fh;
 		}
 		// Update parent on lookup by name, because inode may have been moved
