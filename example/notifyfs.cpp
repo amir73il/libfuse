@@ -105,15 +105,18 @@ struct fid64 {
 
 // Indexed state bits
 enum {
+	// Index state flags are w.r.t a specific index ID
 	_IDX_PARENT,	// All ancestors are indexed
 	_IDX_SELF,	// Directory inode itself is indexed
 	_IDX_MOVED,	// Directory was moved
+	// Index ID stored in upper 32bits
+	_IDX_ID = 32,
 };
 
-#define IDX_INIT	0U
-#define IDX_PARENT	(1U << _IDX_PARENT)
-#define IDX_SELF	(1U << _IDX_SELF)
-#define IDX_MOVED	(1U << _IDX_MOVED)
+#define IDX_INIT	(0UL)
+#define IDX_PARENT	(1UL << _IDX_PARENT)
+#define IDX_SELF	(1UL << _IDX_SELF)
+#define IDX_MOVED	(1UL << _IDX_MOVED)
 #define IDX_PATH	(IDX_PARENT | IDX_SELF)
 #define IDX_MASK	(IDX_PATH  | IDX_MOVED)
 
@@ -121,13 +124,18 @@ enum {
 #define IDX_TEST(bits, mask) \
 	(((bits) & (mask)) == (mask))
 #define IDX_FLAGS(bits) \
-	((bits) & IDX_MASK)
-#define IDX_VALID(bits) \
-	(!((bits) & ~IDX_MASK))
+	((unsigned)((bits) & IDX_MASK))
+#define IDX_ID(bits) \
+	((unsigned)((bits) >> _IDX_ID))
+#define IDX_BITS(id, flags) \
+	((uint64_t)(flags) | (uint64_t)(id) << _IDX_ID)
+#define IDX_VALID(id, bits) \
+	(((bits) & ~IDX_MASK) == IDX_BITS(id, 0))
 
 // Index state determines if inode is recorded in change tracking snapshot.
 // We only ever set bits in a state after allocating a fuse_state_t.
-struct IndexState {
+class IndexState {
+public:
 	fid64 fid;
 	ino_t parent;
 
@@ -143,23 +151,39 @@ struct IndexState {
 	}
 
 	void reset() {
-		indexed.store(IDX_INIT, memory_order_relaxed);
+		_indexed.store(IDX_INIT, memory_order_relaxed);
 	}
-	void set(unsigned flags) {
-		// Set new state flags without clearing existing flags
-		indexed.fetch_or(flags, memory_order_relaxed);
+	void set(unsigned id, unsigned flags) {
+		uint64_t new_bits = IDX_BITS(id, flags);
+		uint64_t expected = _indexed.load(memory_order_relaxed);
+		uint64_t desired;
+
+		// Auto-invalidate flags referring to old id
+		do {
+			uint64_t old_id = IDX_ID(expected);
+
+			if (old_id && old_id != id) {
+				// Old state flags are referring to old index,
+				// clear existing flags and set new ones
+				desired = new_bits;
+			} else {
+				// Set new state flags without clearing existing flags
+				desired = expected | new_bits;
+			}
+		} while (!_indexed.compare_exchange_weak(expected, desired,
+							 memory_order_relaxed));
 	}
-	bool test(unsigned mask) {
-		auto v = indexed.load(memory_order_relaxed);
-		return IDX_VALID(v) && IDX_TEST(v, mask);
+	bool test(unsigned id, unsigned mask) {
+		auto v = _indexed.load(memory_order_relaxed);
+		return IDX_VALID(id, v) && IDX_TEST(IDX_FLAGS(v), mask);
 	}
-	unsigned get() {
-		auto v = indexed.load(memory_order_relaxed);
-		return IDX_VALID(v) ? IDX_FLAGS(v) : IDX_INIT;
+	unsigned get(unsigned id) {
+		auto v = _indexed.load(memory_order_relaxed);
+		return IDX_VALID(id, v) ? IDX_FLAGS(v) : IDX_INIT;
 	}
 
 private:
-	atomic<unsigned> indexed {ATOMIC_VAR_INIT(IDX_INIT)};
+	atomic<uint64_t> _indexed {ATOMIC_VAR_INIT(IDX_INIT)};
 };
 
 #define IDX_STATE(s) (reinterpret_cast<IndexState *>(s))
@@ -329,10 +353,10 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 	auto const create = isdir && (ctx->op != OP_RO);
 	auto const update = create && (ctx->op != OP_PARENT);
 	auto const move = (ctx->op == OP_MOVE);
-	if (move && !update && idx->test(IDX_MOVED))
+	if (move && !update && idx->test(id(), IDX_MOVED))
 		return;
 
-	if (!move && !update && idx->test(IDX_SELF))
+	if (!move && !update && idx->test(id(), IDX_SELF))
 		return;
 
 	// We index directories by FUSE nodeid, so we can get state of parent
@@ -349,7 +373,7 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 	// becauses we only need to trigger indexing for directories that
 	// existed at the time that index was created.
 	if (!isdir || dir_is_new(inode.get_fd())) {
-		idx->set(IDX_SELF | IDX_MOVED);
+		idx->set(id(), IDX_SELF | IDX_MOVED);
 		return;
 	}
 
@@ -370,14 +394,14 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 		// Update index timestamp if it was already observed (atime > mtime)
 		ret = utimensat(_dirfd, fid_path.c_str(), NULL, AT_SYMLINK_NOFOLLOW);
 		updated = (ret == 0);
-	} else if (!move && idx->test(IDX_SELF)) {
+	} else if (!move && idx->test(id(), IDX_SELF)) {
 		// Reduce debug noise - if index was not created/updated and dir
 		// was already cached as indexed, do not print debug message
 		return;
 	}
 
-	if (move && !idx->test(IDX_MOVED) && check_index_moved(fid_path, created))
-		idx->set(IDX_MOVED);
+	if (move && !idx->test(id(), IDX_MOVED) && check_index_moved(fid_path, created))
+		idx->set(id(), IDX_MOVED);
 
 	if (nfyfs.debug())
 		cerr << "DEBUG: directory inode " << inode.ino()
@@ -385,7 +409,7 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 			   (updated ? " once again" : " is already"))
 			<< (move ? " marked moved" : " indexed") << endl;
 
-	idx->set(IDX_SELF);
+	idx->set(id(), IDX_SELF);
 	return;
 }
 
@@ -427,7 +451,7 @@ static bool fill_index_state(const fuse_inode &inode,
 		// We treat root as "parent indexed" and root itself
 		// will be indxed on the first modification
 		if (inode.is_root())
-			idx->set(IDX_PARENT);
+			idx->set(ctx->index->id(), IDX_PARENT);
 
 		if (nfyfs.debug())
 			cerr << "DEBUG: fill_state=0x" << hex << idx
@@ -504,7 +528,7 @@ bool Index::index_parents(IndexState *idx)
 	// ancestors, until hitting an ancestor with indexed path
 	unordered_map<ino_t, IndexState *> ancestors;
 	while (parent) {
-		if (pidx->test(IDX_PATH))
+		if (pidx->test(id(), IDX_PATH))
 			break;
 
 		// Test for loops and too deep path
@@ -517,7 +541,7 @@ bool Index::index_parents(IndexState *idx)
 		}
 
 		pidx = get_index_state(parent, OP_PARENT);
-		if (!pidx || pidx->parent == parent || !pidx->test(IDX_SELF)) {
+		if (!pidx || pidx->parent == parent || !pidx->test(id(), IDX_SELF)) {
 			pidx = NULL;
 			break;
 		}
@@ -539,7 +563,7 @@ bool Index::index_parents(IndexState *idx)
 
 	// Mark all ancestors indexed path
 	for (auto& [ino, pidx] : ancestors)
-		pidx->set(IDX_PARENT);
+		pidx->set(id(), IDX_PARENT);
 
 	return true;
 }
@@ -583,23 +607,24 @@ static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 		return false;
 
 	auto rw = (op != OP_RO);
-	if (rw && !idx->test(IDX_PARENT) && index->index_parents(idx))
-		idx->set(IDX_PARENT);
+	auto id = index->id();
+	if (rw && !idx->test(id, IDX_PARENT) && index->index_parents(idx))
+		idx->set(id, IDX_PARENT);
 
 	if (nfyfs.debug()) {
 		cerr << "DEBUG: " << caller << "(" << at.path() << ")"
-			<< " inode " << ino
-			<< " index state 0x" << hex << noshowbase
-			<< idx->get() << dec << endl;
+			<< " inode " << ino << " index " << id
+			<< " state 0x" << hex << noshowbase
+			<< idx->get(id) << dec << endl;
 	}
 
 	// Do not allow move of directory unless it is marked as moved in index
-	if (move && !idx->test(IDX_MOVED))
+	if (move && !idx->test(id, IDX_MOVED))
 		return false;
 
 	// Do not allow modifications to inode unless all path elements
 	// (all parent directories and self) are indexed or newer than index.
-	return !rw || idx->test(IDX_PATH);
+	return !rw || idx->test(id, IDX_PATH);
 }
 
 #define index_ro_path_at(index, at) index_path_at(index, at, OP_RO, EPERM)
@@ -644,11 +669,12 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 		return 0;
 	}
 
-	auto parent_indexed = pidx->test(IDX_PATH);
+	auto id = index->id();
+	auto parent_indexed = pidx->test(id, IDX_PATH);
 	if (nfyfs.debug()) {
-		cerr << "DEBUG: parent " << pino
-			<< " indexed state 0x" << hex << noshowbase
-			<< pidx->get() << dec << endl;
+		cerr << "DEBUG: parent " << pino << " indexed " << id
+			<< " state 0x" << hex << noshowbase
+			<< pidx->get(id) << dec << endl;
 	}
 
 	// Inode state is created on lookup() and may be updated later
@@ -663,8 +689,8 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 
 	// Record in inode state if all its ancestors are indexed
 	if (parent_indexed) {
-		idx->set(IDX_PARENT);
-	} else if (idx->test(IDX_PARENT)) {
+		idx->set(id, IDX_PARENT);
+	} else if (idx->test(id, IDX_PARENT)) {
 		// This can happen if ancestor was renamed in the source
 		// from an indexed path without indexing the new path
 		idx->reset();
