@@ -2675,7 +2675,7 @@ static void assign_lowlevel_ops(fuse_lowlevel_ops &pfs_oper)
 	pfs_oper.create = pfs_create;
 	pfs_oper.open = pfs_open;
 	pfs_oper.release = pfs_release;
-	if (fs.opts.async_flush)
+	if (!fs.opts.async_flush)
 		pfs_oper.flush = pfs_flush;
 	pfs_oper.fsync = pfs_fsync;
 	pfs_oper.read = pfs_read;

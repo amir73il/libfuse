@@ -33,7 +33,7 @@ struct fuse_passthrough_opts {
 	bool nosplice{false};
 	bool nocache{false};
 	bool wbcache{false};
-	bool async_flush{false};
+	bool async_flush{true};
 	bool singlethread{false};
 	bool foreground{false};
 	bool clone_fd{true};
