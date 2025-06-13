@@ -268,7 +268,7 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
             tst_passthrough(src_dir, mnt_dir)
         tst_append(src_dir, mnt_dir)
         tst_seek(src_dir, mnt_dir)
-        tst_mkdir(mnt_dir)
+        new_dir = tst_mkdir(mnt_dir)
         if cache:
             # if cache is enabled, no operations should go through
             # src_dir as the cache will become stale.
@@ -290,12 +290,18 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
         if not redirect:
             tst_open_unlink(mnt_dir)
 
+        ref_index_entries = num_index_entries = 0
         if name == 'notifyfs':
             # Verify that changes were recorded in index dir
-            # and change index dir before test_syscalls
+            ref_index_entries = os.stat(index_dir).st_nlink - 2
+            assert ref_index_entries > 0
+            # Verify that create of file in new dir adds an index entry.
+            new_file = open(new_dir + "/newfile", 'w')
             num_index_entries = os.stat(index_dir).st_nlink - 2
-            assert num_index_entries > 0
-            assert os.stat(index_dir2).st_nlink == 2
+            assert num_index_entries > ref_index_entries
+            # Verify new index dir is empty and change index dir before test_syscalls
+            ref_index_entries = os.stat(index_dir2).st_nlink - 2
+            assert ref_index_entries == 0
             os.setxattr(mnt_dir, b'user.notifyfs.index_path', index_dir2.encode('utf-8'))
 
         # test_syscalls assumes that changes in source directory
@@ -311,12 +317,22 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
                 syscall_test_cmd.append('-u')
             subprocess.check_call(syscall_test_cmd)
 
-            # Verify that index entries were recorded only in new index dir.
             # test_syscalls created many subdirs so new index dir is expected
             # to have more entries than the old index dir had.
-            if name == 'notifyfs':
-                assert num_index_entries == os.stat(index_dir).st_nlink - 2
-                assert num_index_entries < os.stat(index_dir2).st_nlink - 2
+            ref_index_entries = num_index_entries
+
+        if name == 'notifyfs':
+            # Verify that no index entries were recorded in old index dir.
+            assert num_index_entries == os.stat(index_dir).st_nlink - 2
+            # Verify that at least one change is recorded in new index dir
+            # after write and close of file opened at old index time.
+            # Wait 1 sec for async close to record the change in new index dir.
+            # If test_syscalls did not run, this is the only index entry.
+            new_file.write('123')
+            new_file.close()
+            safe_sleep(1)
+            assert ref_index_entries < os.stat(index_dir2).st_nlink - 2
+
     except:
         cleanup(mount_process, mnt_dir)
         raise
@@ -604,6 +620,7 @@ def tst_mkdir(mnt_dir):
     # Some filesystem (e.g. BTRFS) don't track st_nlink for directories
     assert fstat.st_nlink in (1,2)
     assert dirname in os.listdir(mnt_dir)
+    return fullname
 
 def tst_rmdir(mnt_dir, src_dir=None):
     name = name_generator()

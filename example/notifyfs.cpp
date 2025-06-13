@@ -644,7 +644,7 @@ static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 #define index_rw_path_at(index, at) index_path_at(index, at, OP_RW, EPERM)
 #define index_move_path_at(index, at) index_path_at(index, at, OP_MOVE, EXDEV)
 #define index_path_at(index, at, op, err)			\
-	if (!__index_path_at((index).get(), (at), (op), __func__)) {	\
+	if (!__index_path_at((index).get(), (at), (op), __func__) && (err)) { \
 		errno = (err);				\
 		return -1;				\
 	}
@@ -834,6 +834,17 @@ static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 	return next_op(open)(at, fi);
 }
 
+static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
+{
+	index_op op = ((fi->flags & O_ACCMODE) == O_RDONLY) ? OP_RO : OP_RW;
+	auto index = nfyfs.index();
+	// Record a change on close of rw fd in curr index.
+	// This in needed in case fd was opened in a time of a prev index.
+	// This is best effort because fuse release is async.
+	index_path_at(index, at, op, 0);
+	return next_op(release)(at, fi);
+}
+
 #define XATTR_INDEX_PATH "user.notifyfs.index_path"
 
 static int nfyfs_setxattr(const fuse_path_at &at, const char *name,
@@ -878,6 +889,7 @@ static void nfyfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.unlink = nfyfs_unlink;
 	oper.create = nfyfs_create;
 	oper.open = nfyfs_open;
+	oper.release = nfyfs_release;
 	oper.setxattr = nfyfs_setxattr;
 	oper.removexattr = nfyfs_removexattr;
 }
