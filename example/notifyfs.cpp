@@ -66,6 +66,16 @@ namespace fs = std::filesystem;
 
 class Index;
 
+// RWFile class for storing R/W file state
+class RWFile {
+public:
+	RWFile() = default;
+	~RWFile() = default;
+
+	// Add any RW-specific functionality here
+	// For now, this serves as a marker for RW file operations
+};
+
 struct NotifyFs : public fuse_passthrough_module {
 	bool index_all{false};
 	bool index_by_src_ino{true};
@@ -78,9 +88,25 @@ struct NotifyFs : public fuse_passthrough_module {
 		return atomic_load(&_index);
 	}
 
+	// Add RWFile to the list
+	void add_rwfile(const RWFile *rwfile) {
+		lock_guard<mutex> lock(_rwfiles_lock);
+		_rwfiles.push_back(rwfile);
+	}
+
+	// Remove RWFile from the list
+	void remove_rwfile(const RWFile *rwfile) {
+		lock_guard<mutex> lock(_rwfiles_lock);
+		_rwfiles.remove(rwfile);
+	}
+
 private:
 	mutex _index_lock;
 	shared_ptr<Index> _index;
+
+	// List to track all active RWFile objects
+	mutex _rwfiles_lock;
+	std::list<const RWFile*> _rwfiles;
 };
 static NotifyFs nfyfs{};
 
@@ -819,11 +845,36 @@ static int nfyfs_unlink(const fuse_path_at &at)
 	return next_op(unlink)(at);
 }
 
+// Helper function called after successful open/create operations
+static int finish_open(fuse_file_info *fi, index_op op)
+{
+	if (op == OP_RW) {
+		// Allocate a new RWFile object and store it in file module state
+		auto rwfile = new RWFile();
+		fuse_state_t state = reinterpret_cast<fuse_state_t>(rwfile);
+
+		if (!set_module_file_state(nfyfs, fi, state)) {
+			delete rwfile;
+			return -ENOMEM;
+		}
+
+		// Add the RWFile to the list
+		nfyfs.add_rwfile(rwfile);
+	}
+
+	return 0;
+}
+
 static int nfyfs_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 {
 	auto index = nfyfs.index();
 	index_rw_path_at(index, at);
-	return next_op(create)(at, mode, fi);
+
+	int ret = next_op(create)(at, mode, fi);
+	if (ret)
+		return ret;
+
+	return finish_open(fi, OP_RW);
 }
 
 static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
@@ -831,7 +882,12 @@ static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 	index_op op = ((fi->flags & O_ACCMODE) == O_RDONLY) ? OP_RO : OP_RW;
 	auto index = nfyfs.index();
 	index_path_at(index, at, op, EPERM);
-	return next_op(open)(at, fi);
+
+	int ret = next_op(open)(at, fi);
+	if (ret)
+		return ret;
+
+	return finish_open(fi, op);
 }
 
 static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
@@ -842,6 +898,18 @@ static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
 	// This in needed in case fd was opened in a time of a prev index.
 	// This is best effort because fuse release is async.
 	index_path_at(index, at, op, 0);
+
+	// Clean up RWFile object if it exists
+	if (op == OP_RW) {
+		fuse_state_t state;
+		if (get_module_file_state(nfyfs, fi, state)) {
+			auto rwfile = reinterpret_cast<RWFile*>(state);
+			// Remove the RWFile from the list before deleting
+			nfyfs.remove_rwfile(rwfile);
+			delete rwfile;
+		}
+	}
+
 	return next_op(release)(at, fi);
 }
 
