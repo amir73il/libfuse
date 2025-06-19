@@ -173,8 +173,13 @@ struct fill_index_ctx {
 class Index {
 public:
 	Index() {}
-	Index(const string &path, chrono::nanoseconds btime, unsigned id) :
-		_index_dir_path(path), _index_dir_btime(btime), _index_id(id) {}
+	Index(const string &path, chrono::nanoseconds btime, unsigned id, int dirfd) :
+		_index_dir_path(path), _index_dir_btime(btime), _index_id(id),
+		_dirfd(dirfd) {}
+	~Index() {
+		if (_dirfd >= 0)
+			close(_dirfd);
+	}
 
 	bool dir_is_new(int dirfd, const char *path = "") const;
 	string fid_index_path(const file_handle &fid) const;
@@ -201,6 +206,7 @@ private:
 	string _index_dir_path;
 	chrono::nanoseconds _index_dir_btime{0ns};
 	unsigned _index_id{0};
+	int _dirfd{-1};
 };
 
 static string buf2hex(const unsigned char *buf, unsigned int size)
@@ -227,7 +233,7 @@ static string buf2hex(const unsigned char *buf, unsigned int size)
 
 string Index::fid_index_path(const file_handle &fid) const
 {
-	return _index_dir_path + '/' + buf2hex(fid.f_handle, fid.handle_bytes);
+	return buf2hex(fid.f_handle, fid.handle_bytes);
 }
 
 // Get immutable creation time of directory from filesystem (e.g. xfs, ext4)
@@ -277,8 +283,9 @@ bool Index::dir_is_new(int dirfd, const char *path) const
 #define OVL_XATTR_OPAQUE "trusted.overlay.opaque"
 
 // Check if inode was marked as moved
-bool Index::check_index_moved(const string &index_path, bool &created)
+bool Index::check_index_moved(const string &fid_path, bool &created)
 {
+	auto index_path = _index_dir_path + '/' + fid_path;
 	auto res = lgetxattr(index_path.c_str(), OVL_XATTR_OPAQUE, NULL, 0);
 	if (res > 0)
 		return true;
@@ -338,22 +345,22 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 		return;
 	}
 
-	auto index_path = fid_index_path(idx->fid.fh);
+	auto fid_path = fid_index_path(idx->fid.fh);
 	struct stat stat;
-	auto ret = lstat(index_path.c_str(), &stat);
+	auto ret = fstatat(_dirfd, fid_path.c_str(), &stat, AT_SYMLINK_NOFOLLOW);
 	auto created = false;
 	auto updated = false;
 	if (ret == -1) {
 		if (errno != ENOENT || !create)
 			return;
 
-		ret = mkdir(index_path.c_str(), 0755);
+		ret = mkdirat(_dirfd, fid_path.c_str(), 0755);
 		created = (ret == 0);
 		if (ret == -1 && errno != EEXIST)
 			return;
 	} else if (update && !check_index_modified(stat)) {
 		// Update index timestamp if it was already observed (atime > mtime)
-		ret = utimensat(AT_FDCWD, index_path.c_str(), NULL, AT_SYMLINK_NOFOLLOW);
+		ret = utimensat(_dirfd, fid_path.c_str(), NULL, AT_SYMLINK_NOFOLLOW);
 		updated = (ret == 0);
 	} else if (!move && idx->test(IDX_SELF)) {
 		// Reduce debug noise - if index was not created/updated and dir
@@ -361,7 +368,7 @@ void Index::inode_check_index(const fuse_inode &inode, IndexState *idx,
 		return;
 	}
 
-	if (move && !idx->test(IDX_MOVED) && check_index_moved(index_path, created))
+	if (move && !idx->test(IDX_MOVED) && check_index_moved(fid_path, created))
 		idx->set(IDX_MOVED);
 
 	if (nfyfs.debug())
@@ -830,7 +837,15 @@ bool NotifyFs::set_index_path(const string &index_path)
 	if (old_index && old_index->dir_path() == path)
 		return true;
 
-	auto [btime, ino] = get_dir_btime_ino(AT_FDCWD, path.c_str());
+	auto dirfd = openat(AT_FDCWD, path.c_str(),
+			    O_PATH | O_DIRECTORY | O_NOFOLLOW);
+	if (dirfd < 0) {
+		cerr << "open(" << path << ") failed: "
+			<< strerror(errno) << endl;
+		return false;
+	}
+
+	auto [btime, ino] = get_dir_btime_ino(dirfd, "");
 	if (index_all)
 		btime = 0ns;
 
@@ -838,15 +853,17 @@ bool NotifyFs::set_index_path(const string &index_path)
 	if (++id == 0) {
 		// Do not allow wraparound of index id
 		cerr << "ERROR: index id wraparound." << endl;
+		close(dirfd);
 		return false;
 	}
 
 	try {
-		auto index = make_shared<Index>(path, btime, id);
+		auto index = make_shared<Index>(path, btime, id, dirfd);
 		cout << "INFO: Created index " << id << " on " << path << endl;
 		atomic_store(&_index, index);
 	} catch (const std::bad_alloc& e) {
 		cerr << "ERROR: Allocate new index failed: " << e.what() << endl;
+		close(dirfd);
 		return false;
 	}
 	return true;
