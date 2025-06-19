@@ -111,6 +111,9 @@ struct NotifyFs : public fuse_passthrough_module {
 		_old_rwfiles.remove(rwfile);
 	}
 
+	// Get old RWFiles inodes for xattr
+	size_t get_old_rwfiles_inodes(char *value, size_t size);
+
 private:
 	mutex _index_lock;
 	shared_ptr<Index> _index;
@@ -946,6 +949,60 @@ static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
 }
 
 #define XATTR_INDEX_PATH "user.notifyfs.index_path"
+#define XATTR_OLD_RWFILES "user.notifyfs.old_rwfiles"
+
+size_t NotifyFs::get_old_rwfiles_inodes(char *value, size_t size) {
+	// Protects against concurrent set_index_path()
+	lock_guard<mutex> index_lock(_index_lock);
+	// Protects against concurrent open()/release() of rwfiles
+	lock_guard<mutex> rwfiles_lock(_rwfiles_lock);
+
+	// Calculate required buffer size (number of old RWFiles * sizeof(ino_t))
+	size_t required_size = _old_rwfiles.size() * sizeof(ino_t);
+
+	// If value is NULL, return the required size (standard getxattr behavior)
+	if (!value) {
+		return required_size;
+	}
+
+	// Don't exceed the provided buffer size
+	size_t copy_size = min(size, required_size);
+	size_t num_inos = copy_size / sizeof(ino_t);
+
+	// Fill buffer with ino values from old RWFiles list
+	ino_t *ino_buffer = reinterpret_cast<ino_t*>(value);
+	auto it = _old_rwfiles.begin();
+	size_t i = 0;
+
+	// Get current index for recording state changes
+	auto current_index = index();
+
+	while (i < num_inos && it != _old_rwfiles.end()) {
+		ino_t ino = (*it)->get_ino();
+
+		// Fill buffer with inode number
+		ino_buffer[i++] = ino;
+
+		// Move this RWFile to current list
+		auto current = it++;
+		_rwfiles.splice(_rwfiles.end(), _old_rwfiles, current);
+	}
+
+	return i * sizeof(ino_t);
+}
+
+static int nfyfs_getxattr(const fuse_path_at &at, const char *name,
+			  char *value, size_t size)
+{
+	static string xattr_old_rwfiles = XATTR_OLD_RWFILES;
+	if (xattr_old_rwfiles == name) {
+		return nfyfs.get_old_rwfiles_inodes(value, size);
+	}
+
+	auto index = nfyfs.index();
+	index_ro_path_at(index, at);
+	return next_op(getxattr)(at, name, value, size);
+}
 
 static int nfyfs_setxattr(const fuse_path_at &at, const char *name,
 			  const char *value, size_t size, int flags)
@@ -971,7 +1028,6 @@ static int nfyfs_removexattr(const fuse_path_at &at, const char *name)
 	return next_op(removexattr)(at, name);
 }
 
-
 static void nfyfs_assign_operations(fuse_passthrough_operations &oper)
 {
 	oper.lookup = nfyfs_lookup;
@@ -990,6 +1046,7 @@ static void nfyfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.create = nfyfs_create;
 	oper.open = nfyfs_open;
 	oper.release = nfyfs_release;
+	oper.getxattr = nfyfs_getxattr;
 	oper.setxattr = nfyfs_setxattr;
 	oper.removexattr = nfyfs_removexattr;
 }

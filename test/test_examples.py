@@ -303,6 +303,13 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
             ref_index_entries = os.stat(index_dir2).st_nlink - 2
             assert ref_index_entries == 0
             os.setxattr(mnt_dir, b'user.notifyfs.index_path', index_dir2.encode('utf-8'))
+            if not cache:
+                # Verify that old_rwfiles contains a single ino of the new file
+                old_rwfiles = os.getxattr(mnt_dir, b'user.notifyfs.old_rwfiles')
+                assert len(old_rwfiles) == 8 # sizeof(ino_t)
+                # Verify that old_rwfiles is empty
+                old_rwfiles = os.getxattr(mnt_dir, b'user.notifyfs.old_rwfiles')
+                assert len(old_rwfiles) == 0
 
         # test_syscalls assumes that changes in source directory
         # will be reflected immediately in mountpoint, so we
@@ -327,11 +334,16 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
             # Verify that at least one change is recorded in new index dir
             # after write and close of file opened at old index time.
             # Wait 1 sec for async close to record the change in new index dir.
-            # If test_syscalls did not run, this is the only index entry.
+            # In cache mode, this is the only index entry and it is recorded
+            # only here on close.
             new_file.write('123')
             new_file.close()
             safe_sleep(1)
             assert ref_index_entries < os.stat(index_dir2).st_nlink - 2
+            # Verify that old_rwfiles is empty (in cache mode) after close of open file
+            # (in non cache mode, old_rwfiles was already read and emptied above).
+            old_rwfiles = os.getxattr(mnt_dir, b'user.notifyfs.old_rwfiles')
+            assert len(old_rwfiles) == 0
 
     except:
         cleanup(mount_process, mnt_dir)
