@@ -512,8 +512,8 @@ bool fuse_path_at::reconnect() const
 			break;
 		if (de->d_ino == ino) {
 			// child found - look it up to connect its dentry in cache
-			faccessat(dirfd, de->d_name, F_OK, AT_SYMLINK_NOFOLLOW);
-			if (fs.debug())
+			auto err = faccessat(dirfd, de->d_name, F_OK, AT_SYMLINK_NOFOLLOW);
+			if (!err && fs.debug())
 				cerr << "DEBUG: found child '" << de->d_name
 					<< "' with inode " << ino << endl;
 			break;
