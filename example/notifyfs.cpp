@@ -111,7 +111,7 @@ struct NotifyFs : public fuse_passthrough_module {
 		_old_rwfiles.remove(rwfile);
 	}
 
-	// Get old RWFiles inodes for xattr
+	// Get old RWFiles inodes for xattr and record them in the index
 	size_t get_old_rwfiles_inodes(char *value, size_t size);
 
 private:
@@ -272,6 +272,7 @@ public:
 	void inode_check_index(const fuse_inode &inode, IndexState *idx,
 			       fill_index_ctx *ctx);
 	IndexState *get_index_state(ino_t ino, index_op op, ino_t pino = 0);
+	IndexState *index_inode(ino_t ino, index_op op, ino_t pino = 0);
 	bool index_parents(IndexState *idx);
 
 	bool is_valid() const {
@@ -622,6 +623,21 @@ bool Index::index_parents(IndexState *idx)
 	return true;
 }
 
+IndexState *Index::index_inode(ino_t ino, index_op op, ino_t pino)
+{
+	auto idx = get_index_state(ino, op, pino);
+	if (!idx)
+		return nullptr;
+
+	if (op == OP_RO || idx->test(id(), IDX_PARENT))
+		return idx;
+
+	if (index_parents(idx))
+		idx->set(id(), IDX_PARENT);
+
+	return idx;
+}
+
 // Check if dir and parents are indexed in change tracking snapshot
 static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 			    const char *caller)
@@ -656,14 +672,12 @@ static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 		ino = st.st_ino;
 	}
 
-	auto idx = index->get_index_state(ino, op, pino);
+	auto idx = index->index_inode(ino, op, pino);
 	if (!idx)
 		return false;
 
 	auto rw = (op != OP_RO);
 	auto id = index->id();
-	if (rw && !idx->test(id, IDX_PARENT) && index->index_parents(idx))
-		idx->set(id, IDX_PARENT);
 
 	if (nfyfs.debug()) {
 		cerr << "DEBUG: " << caller << "(" << at.path() << ")"
@@ -969,7 +983,7 @@ size_t NotifyFs::get_old_rwfiles_inodes(char *value, size_t size) {
 	size_t copy_size = min(size, required_size);
 	size_t num_inos = copy_size / sizeof(ino_t);
 
-	// Fill buffer with ino values from old RWFiles list
+	// Fill buffer with ino values from old RWFiles list and record them in the index
 	ino_t *ino_buffer = reinterpret_cast<ino_t*>(value);
 	auto it = _old_rwfiles.begin();
 	size_t i = 0;
@@ -982,6 +996,11 @@ size_t NotifyFs::get_old_rwfiles_inodes(char *value, size_t size) {
 
 		// Fill buffer with inode number
 		ino_buffer[i++] = ino;
+
+		// Record state change in new index for this inode
+		if (current_index && current_index->is_valid()) {
+			current_index->index_inode(ino, OP_RW);
+		}
 
 		// Move this RWFile to current list
 		auto current = it++;

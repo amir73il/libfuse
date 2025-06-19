@@ -307,6 +307,8 @@ def test_passthrough_hp(short_tmpdir, mode, name, output_checker):
                 # Verify that old_rwfiles contains a single ino of the new file
                 old_rwfiles = os.getxattr(mnt_dir, b'user.notifyfs.old_rwfiles')
                 assert len(old_rwfiles) == 8 # sizeof(ino_t)
+                # Verify old rwfile was recorded in new index dir
+                assert os.stat(index_dir2).st_nlink > 2
                 # Verify that old_rwfiles is empty
                 old_rwfiles = os.getxattr(mnt_dir, b'user.notifyfs.old_rwfiles')
                 assert len(old_rwfiles) == 0
