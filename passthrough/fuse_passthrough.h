@@ -306,8 +306,12 @@ struct fuse_passthrough_operations {
 	 *
 	 * It can be used by a passthrough module, such as HSM, to manifest
 	 * the file is source directory before the actual passthrough lookup.
+	 *
+	 * @fi is non NULL only for lookup() called from create() operation,
+	 * a.k.a. atomic_open().
 	 */
-	int (*lookup) (const fuse_path_at &, fuse_entry_param *);
+	int (*lookup) (const fuse_path_at &, fuse_entry_param *,
+			struct fuse_file_info *fi);
 	/*
 	 * forget() operation should be implemented by modules to destruct
 	 * inode state objects. It is called before freeing inode with the

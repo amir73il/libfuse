@@ -1361,7 +1361,7 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	return 0;
 }
 
-static int do_lookup(const fuse_path_at &at, fuse_entry_param *e)
+static int do_lookup(const fuse_path_at &at, fuse_entry_param *e, struct fuse_file_info *)
 {
 	auto err = __do_lookup(at, at.path(), e);
 	if (err) {
@@ -1407,7 +1407,7 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 		return;
 
 	fuse_path_at at(req, inode_ref, name);
-	auto res = call_op(lookup)(at, &e);
+	auto res = call_op(lookup)(at, &e, nullptr);
 	if (!res) {
 		fuse_reply_entry(req, &e);
 	} else if (errno != ENOENT) {
@@ -1568,7 +1568,7 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent,
 		goto out;
 
 	fuse_entry_param e;
-	res = call_op(lookup)(at, &e);
+	res = call_op(lookup)(at, &e, nullptr);
 	if (res == -1)
 		goto out;
 
@@ -1687,7 +1687,7 @@ static void pfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 	// Lookup to update new parent in connectable file handle of moved inode
 	fuse_entry_param e {};
-	res = do_lookup(newat, &e);
+	res = do_lookup(newat, &e, nullptr);
 	if (!res)
 		forget_one(req, e.ino, 1);
 	fuse_reply_errno(req, res);
@@ -2115,7 +2115,7 @@ static void pfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 	}
 
 	fuse_entry_param e;
-	res = call_op(lookup)(at, &e);
+	res = call_op(lookup)(at, &e, fi);
 	if (res == -1) {
 		auto saverr = errno;
 		call_op(release)(at, fi);

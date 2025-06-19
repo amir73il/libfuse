@@ -576,7 +576,8 @@ static bool path_is_dir(const fuse_path_at &at)
 //
 // cachegwfs operations
 //
-static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
+static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e,
+			struct fuse_file_info *fi)
 {
 	// Check if reading parent directory should be redirected
         // and lookup child in redirected path to trigger populate of the
@@ -593,7 +594,7 @@ static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	}
 	// Lookup itself is never in the redirected path, because we
 	// need to find the real xfs inode
-	auto ret = next_op(lookup)(at, e);
+	auto ret = next_op(lookup)(at, e, fi);
 	if (ret)
 		return ret;
 

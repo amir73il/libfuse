@@ -69,11 +69,17 @@ class Index;
 // RWFile class for storing R/W file state
 class RWFile {
 public:
-	RWFile() = default;
+	RWFile(ino_t inode_num) : ino(inode_num) {}
 	~RWFile() = default;
+
+	ino_t get_ino() const { return ino; }
+	void set_ino(ino_t new_ino) { ino = new_ino; }
 
 	// Add any RW-specific functionality here
 	// For now, this serves as a marker for RW file operations
+
+private:
+	ino_t ino;  // Store the inode number
 };
 
 struct NotifyFs : public fuse_passthrough_module {
@@ -678,13 +684,25 @@ static bool __index_path_at(Index *index, const fuse_path_at &at, index_op op,
 //
 // notifyfs operations
 //
-static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
+static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e,
+			struct fuse_file_info *fi)
 {
 	auto index = nfyfs.index();
 	index_ro_path_at(index, at);
-	auto ret = next_op(lookup)(at, e);
+
+	int ret = next_op(lookup)(at, e, fi);
 	if (ret)
 		return ret;
+
+	// If fi is provided, it means this lookup is from create operation
+	// Update the RWFile ino with the actual file's inode number
+	if (fi) {
+		fuse_state_t state;
+		if (get_module_file_state(nfyfs, fi, state)) {
+			auto rwfile = reinterpret_cast<RWFile*>(state);
+			rwfile->set_ino(e->ino);
+		}
+	}
 
 	if (!index || !index->is_valid())
 		return 0;
@@ -846,11 +864,18 @@ static int nfyfs_unlink(const fuse_path_at &at)
 }
 
 // Helper function called after successful open/create operations
-static int finish_open(fuse_file_info *fi, index_op op)
+static int finish_open(const fuse_path_at &at, fuse_file_info *fi, index_op op)
 {
 	if (op == OP_RW) {
-		// Allocate a new RWFile object and store it in file module state
-		auto rwfile = new RWFile();
+		// Allocate a new RWFile object and store it in file module state.
+		// NOTE: create operation does not provide the created inode number,
+		// so the parent ino will be stored in RWFile and later be updated
+		// to the file's inode. This is fine because what we care about
+		// is recording changed directories with files open for write.
+		// We only store the file's ino in case it is moved to another
+		// parent while open for write, but that cannot happen in the
+		// middle of an atomic_open (i.e. create() + lookup()).
+		auto rwfile = new RWFile(at.inode().ino());
 		fuse_state_t state = reinterpret_cast<fuse_state_t>(rwfile);
 
 		if (!set_module_file_state(nfyfs, fi, state)) {
@@ -874,7 +899,7 @@ static int nfyfs_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return finish_open(fi, OP_RW);
+	return finish_open(at, fi, OP_RW);
 }
 
 static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
@@ -887,7 +912,7 @@ static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return finish_open(fi, op);
+	return finish_open(at, fi, op);
 }
 
 static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
