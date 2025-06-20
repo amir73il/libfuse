@@ -234,9 +234,9 @@ private:
 	atomic_flag config_is_valid {ATOMIC_FLAG_INIT};
 	shared_ptr<Redirect> _redirect;
 };
-static CgwFs fs{};
+static CgwFs cgwfs{};
 
-#define next_op(op) call_module_next_op(fs, op)
+#define next_op(op) call_module_next_op(cgwfs, op)
 
 
 // Check if the operation @op was configured with redirect_op rule
@@ -245,11 +245,11 @@ static CgwFs fs{};
 static bool should_redirect_fd(int fd, const char *procname, enum op op)
 {
 	// redirect all ops with --redirect cmdline option
-	if (fs.redirect_op(OP_ALL))
+	if (cgwfs.redirect_op(OP_ALL))
 		return true;
 
 	// redirect specific op with config redirect_op = <op name>
-	if (fs.redirect_op(op))
+	if (cgwfs.redirect_op(op))
 		return true;
 
 	bool rw = false, is_dir = false;
@@ -282,11 +282,11 @@ static bool should_redirect_fd(int fd, const char *procname, enum op op)
 		is_dir = true;
 		break;
 	default:
-		return fs.redirect_op(op);
+		return cgwfs.redirect_op(op);
 	}
 
 	// redirect read/write if it has stub xattr
-	auto r = fs.redirect();
+	auto r = cgwfs.redirect();
 	const auto &redirect_xattr = rw ?
 		(is_dir ? r->writedir_xattr : r->write_xattr) :
 		(is_dir ? r->readdir_xattr : r->read_xattr);
@@ -324,12 +324,12 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 	if (redirect)
 		n = readlink(in.proc_path(), linkname, PATH_MAX);
 
-	int prefix = fs.opts.source.size();
+	int prefix = cgwfs.opts.source.size();
 	if (redirect && prefix && n >= prefix &&
-	    !memcmp(fs.opts.source.c_str(), linkname, prefix)) {
+	    !memcmp(cgwfs.opts.source.c_str(), linkname, prefix)) {
 		linkname[n] = 0;
-		auto outpath = fs.redirect_path;
-		if (fs.redirect_path.empty())
+		auto outpath = cgwfs.redirect_path;
+		if (cgwfs.redirect_path.empty())
 			outpath.append(linkname);
 		else
 			outpath.append(linkname + prefix, n - prefix);
@@ -337,7 +337,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 			outpath.append("/");
 			outpath.append(name);
 		}
-		if (fs.debug())
+		if (cgwfs.debug())
 			cerr << "DEBUG: redirect " << op_name(op)
 				<< " |=> " << outpath << endl;
 		// Return redirected path
@@ -347,7 +347,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 			// We need to redirect, but we don't know where to
 			linkname[n] = 0;
 			cerr << "ERROR: redirect " << op_name(op) << "(" << name << "): "
-				<< linkname << " not under " << fs.opts.source << endl;
+				<< linkname << " not under " << cgwfs.opts.source << endl;
 		}
 		// Return a copy of the path we got
 		return in;
@@ -356,7 +356,7 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 
 static uint64_t get_folder_id(const fuse_path_at &at)
 {
-	auto ret = at.inode().get_state(fs);
+	auto ret = at.inode().get_state(cgwfs);
 	if (!ret)
 		return 0;
 
@@ -369,20 +369,20 @@ static bool should_redirect_folder_id_xattr(const fuse_path_at &at, const string
 
 	auto ret = getxattr(at.path(), xattr.c_str(), &folder_id, sizeof(folder_id));
         if (ret == -1) {
-		if (fs.debug() && errno != ENODATA && errno != ENOENT)
+		if (cgwfs.debug() && errno != ENODATA && errno != ENOENT)
 			cerr << "DEBUG: failed to get folder id from xattr '" << xattr
 				<< "' at " << at.path() << ", errno=" << errno << endl;
 		return false;
 	}
 
 	// existing xattr and zero folder_id means redirect all folder ids
-	auto r = fs.redirect();
+	auto r = cgwfs.redirect();
 	return !folder_id || r->test_folder_id(folder_id);
 }
 
 static bool should_redirect_folder_id(const fuse_path_at &at)
 {
-	auto r = fs.redirect();
+	auto r = cgwfs.redirect();
 	auto folder_id = get_folder_id(at);
 
 	if (folder_id && r->test_folder_id(folder_id))
@@ -405,7 +405,7 @@ static bool should_redirect_folder_id(const fuse_path_at &at)
 
 static bool should_redirect_once(const fuse_path_at &at)
 {
-	auto r = fs.redirect();
+	auto r = cgwfs.redirect();
 	if (!r->read_once_enabled())
 		return false;
 
@@ -415,7 +415,7 @@ static bool should_redirect_once(const fuse_path_at &at)
 
 	// Now test if this specific file needs to be redirected once
 	if (r->test_read_once(st)) {
-		if (fs.debug())
+		if (cgwfs.debug())
 			cerr << "DEBUG: redirect once @" << time(NULL) << ","
 				<< " ino=" << st.st_ino << ","
 				<< " size=" << st.st_size << ","
@@ -452,7 +452,7 @@ static enum op redirect_open_op(const fuse_path_at &at, fuse_file_info *fi)
 static int get_file_redirect_fd(fuse_file_info *fi)
 {
 	fuse_state_t state;
-	if (!get_module_file_state(fs, fi, state))
+	if (!get_module_file_state(cgwfs, fi, state))
 		return -1;
 
 	if (state > static_cast<uint64_t>(numeric_limits<int>::max()) &&
@@ -460,7 +460,7 @@ static int get_file_redirect_fd(fuse_file_info *fi)
 		return -1;
 
 	auto rfd = static_cast<int>(state);
-	if (rfd >= 0 && fs.debug()) {
+	if (rfd >= 0 && cgwfs.debug()) {
 		cerr << "DEBUG: get redirect_fd=" << rfd
 			<< ", fd=" << get_file_fd(fi) << endl;
 	}
@@ -472,11 +472,11 @@ static bool set_file_redirect_fd(fuse_file_info *fi, int rfd)
 {
 	fuse_state_t state = static_cast<fuse_state_t>(rfd);
 
-	if (rfd >= 0 && fs.debug()) {
+	if (rfd >= 0 && cgwfs.debug()) {
 		cerr << "DEBUG: set redirect_fd=" << rfd
 			<< ", fd=" << get_file_fd(fi) << endl;
 	}
-	return set_module_file_state(fs, fi, state);
+	return set_module_file_state(cgwfs, fi, state);
 }
 
 static int open_redirect_fd(const fuse_path_at &in, fuse_file_info *fi, int flags)
@@ -487,7 +487,7 @@ static int open_redirect_fd(const fuse_path_at &in, fuse_file_info *fi, int flag
 		flags &= ~O_NOFOLLOW;
 
 	auto rfd = open(out.path(), flags);
-	if (rfd >= 0 && fs.debug()) {
+	if (rfd >= 0 && cgwfs.debug()) {
 		cerr << "DEBUG: open redirect_fd=" << rfd
 			<< ", fd=" << get_file_fd(fi) << endl;
 	}
@@ -500,7 +500,7 @@ static void close_file_redirect_fd(fuse_file_info *fi)
 	auto rfd = get_file_redirect_fd(fi);
 
 	if (rfd >= 0 && rfd != fd) {
-		if (fs.debug()) {
+		if (cgwfs.debug()) {
 			cerr << "DEBUG: close redirect_fd=" << rfd
 				<< ", fd=" << get_file_fd(fi) << endl;
 		}
@@ -540,7 +540,7 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 		rfd = AT_FDCWD;
 	} else if (check_safe_fd(fi, op) == -1) {
 		fail = true;
-	} else if (fs.redirect_op(OP_COPY)) {
+	} else if (cgwfs.redirect_op(OP_COPY)) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
@@ -583,7 +583,7 @@ static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 		auto out = get_fd_path_op(at, OP_LOOKUP);
 		if (out.dirfd() != at.dirfd() &&
 		    faccessat(out.dirfd(), out.path(), F_OK, out.flags())) {
-			if (fs.debug())
+			if (cgwfs.debug())
 				cerr << "faccessat(" << out.path() << ", " << out.flags()
 					<< "): " << strerror(errno) << endl;
 			return -1;
@@ -600,18 +600,18 @@ static int cgwfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	uint64_t folder_id = 0;
 	if (at.inode().is_root() && S_ISDIR(e->attr.st_mode)) {
 		folder_id = strtoull(at.path(), NULL, 10);
-		if (fs.debug() && folder_id)
+		if (cgwfs.debug() && folder_id)
 			cerr << "DEBUG: first level subdir folder id "
 				<< folder_id << endl;
 	} else {
 		folder_id = get_folder_id(at);
-		if (folder_id && fs.debug())
+		if (folder_id && cgwfs.debug())
 			cerr << "DEBUG: inherit parent folder id "
 				<< folder_id << endl;
 	}
 
-	if (folder_id && !set_module_inode_state(fs, e->ino, folder_id)) {
-		if (fs.debug())
+	if (folder_id && !set_module_inode_state(cgwfs, e->ino, folder_id)) {
+		if (cgwfs.debug())
 			cerr << "ERROR: failed setting folder id "
 				<< folder_id
 				<< " ino=" << e->ino << endl;
@@ -765,17 +765,17 @@ static bool xattr_starts_with(const char *name, const string &prefix)
 }
 static enum op redirect_xattr_op(enum op op, const char *name)
 {
-	if (fs.debug())
+	if (cgwfs.debug())
 		cerr << "DEBUG: " << op_name(op) << " " << name << endl;
 
 	// redirect xattr ops for names that match a redirect_xattr_prefix
-	for (const auto& prefix : fs.redirect()->xattr_prefixes) {
+	for (const auto& prefix : cgwfs.redirect()->xattr_prefixes) {
 	    if (xattr_starts_with(name, prefix))
 		return OP_REDIRECT;
 	}
 
 	// redirect implicit chmod/chown via setfacl
-	if (op == OP_SETXATTR && (fs.redirect_op(OP_CHMOD) || fs.redirect_op(OP_CHOWN)) &&
+	if (op == OP_SETXATTR && (cgwfs.redirect_op(OP_CHMOD) || cgwfs.redirect_op(OP_CHOWN)) &&
 	    xattr_starts_with(name, sys_acl_xattr_prefix))
 		return OP_REDIRECT;
 
@@ -947,35 +947,35 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		exit(2);
 	}
 
-	fs.opts.foreground = options.count("foreground");
-	fs.opts.singlethread = options.count("single");
-	fs.opts.nosplice = options.count("nosplice");
-	fs.opts.nocache = options.count("nocache");
-	fs.opts.attr_timeout = fs.opts.nocache ? 0 : 1.0;
-	fs.opts.entry_timeout = fs.opts.attr_timeout;
-	fs.opts.wbcache = !fs.opts.nocache && options.count("wbcache");
+	cgwfs.opts.foreground = options.count("foreground");
+	cgwfs.opts.singlethread = options.count("single");
+	cgwfs.opts.nosplice = options.count("nosplice");
+	cgwfs.opts.nocache = options.count("nocache");
+	cgwfs.opts.attr_timeout = cgwfs.opts.nocache ? 0 : 1.0;
+	cgwfs.opts.entry_timeout = cgwfs.opts.attr_timeout;
+	cgwfs.opts.wbcache = !cgwfs.opts.nocache && options.count("wbcache");
 	// By default library keeps open fds if file handles are not supported,
 	// but user can request keeping open fds and can forbid keeping open fds,
 	// so if file handles are not supported, mount will fail.
 	// Notifyfs requires file handles support for indexing.
 	if (options.count("nokeepfd") || options.count("index_path"))
-		fs.opts.keep_fd = 0;
+		cgwfs.opts.keep_fd = 0;
 	else if (options.count("keepfd"))
-		fs.opts.keep_fd = 1;
-	fs.opts.connected_fd = !fs.opts.keep_fd;
-	fs.opts.kernel_passthrough = !options.count("nopassthrough");
-	fs.opts.readdir_passthrough = options.count("readdirpassthrough");
+		cgwfs.opts.keep_fd = 1;
+	cgwfs.opts.connected_fd = !cgwfs.opts.keep_fd;
+	cgwfs.opts.kernel_passthrough = !options.count("nopassthrough");
+	cgwfs.opts.readdir_passthrough = options.count("readdirpassthrough");
 
 	if (options.count("max_threads"))
-		fs.opts.max_threads = options["max_threads"].as<int>();
+		cgwfs.opts.max_threads = options["max_threads"].as<int>();
 	if (options.count("max_idle_threads"))
-		fs.opts.max_idle_threads = options["max_idle_threads"].as<int>();
+		cgwfs.opts.max_idle_threads = options["max_idle_threads"].as<int>();
 
 	auto rp = realpath(argv[1], NULL);
 	if (!rp)
 		err(1, "ERROR: realpath(\"%s\")", argv[1]);
 	cout << "source is " << rp << endl;
-	fs.opts.source = rp;
+	cgwfs.opts.source = rp;
 
 	auto mp = realpath(argv[2], NULL);
 	if (!mp) {
@@ -983,7 +983,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		exit(1);
 	}
 	cout << "mount point is " << mp << endl;
-	fs.opts.mountpoint = mp;
+	cgwfs.opts.mountpoint = mp;
 
 	if (options.count("redirect_path")) {
 		auto path = options["redirect_path"].as<string>();
@@ -991,11 +991,11 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		if (!rp)
 			err(1, "ERROR: realpath(\"%s\")", path.c_str());
 		cout << "redirect path is " << rp << endl;
-		fs.redirect_path = rp;
+		cgwfs.redirect_path = rp;
 	}
 
-	fs.config_file = options["config_file"].as<string>();
-	cout << "config file is " << fs.config_file << endl;
+	cgwfs.config_file = options["config_file"].as<string>();
+	cout << "config file is " << cgwfs.config_file << endl;
 
 	return options;
 }
@@ -1030,16 +1030,16 @@ static bool parseConfigLine(const string &line, string &name, string &value)
 
 static Redirect *read_config_file()
 {
-	if (fs.redirect_path.empty()) {
+	if (cgwfs.redirect_path.empty()) {
 		// Redirect disabled with mount options
 		return nullptr;
 	}
 
-	ifstream cFile(fs.config_file);
+	ifstream cFile(cgwfs.config_file);
 	if (!cFile.is_open()) {
-		if (fs.config_file != CONFIG_FILE)
+		if (cgwfs.config_file != CONFIG_FILE)
 			cerr << "ERROR: Failed to open config file "
-				<< fs.config_file << endl;
+				<< cgwfs.config_file << endl;
 		return nullptr;
 	}
 
@@ -1061,9 +1061,9 @@ static Redirect *read_config_file()
 		if (name == "debug") {
 			debug = stoi(value);
 		} else if (name == "attr_timeout") {
-			fs.opts.attr_timeout = stoi(value);
+			cgwfs.opts.attr_timeout = stoi(value);
 		} else if (name == "entry_timeout") {
-			fs.opts.entry_timeout = stoi(value);
+			cgwfs.opts.entry_timeout = stoi(value);
 		} else if (name == "redirect_read_xattr") {
 			redirect->read_xattr.push_back(value);
 		} else if (name == "redirect_readdir_xattr") {
@@ -1092,7 +1092,7 @@ static Redirect *read_config_file()
 	if (redirect->test_op(OP_OPEN_RW))
 		redirect->set_op(OP_CREATE);
 
-	fs.opts.debug = debug;
+	cgwfs.opts.debug = debug;
 
 	return redirect;
 }
@@ -1100,7 +1100,7 @@ static Redirect *read_config_file()
 static void reload_config(int)
 {
 	// Request config reload
-	fs.reset_config();
+	cgwfs.reset_config();
 }
 
 static void set_signal_handler()
@@ -1135,14 +1135,14 @@ int main(int argc, char *argv[])
 	auto options {parse_options(argc, argv)};
 
 	// Read defaults from config file
-	auto r = fs.redirect();
+	auto r = cgwfs.redirect();
 	// Re-load config file on SIGHUP
 	set_signal_handler();
 	// These mount option settings are cleared on config file reload
 	if (options.count("redirect"))
 		r->set_op(OP_ALL);
 	if (options.count("debug"))
-		fs.opts.debug = true;
+		cgwfs.opts.debug = true;
 
 	// We need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
@@ -1172,16 +1172,16 @@ int main(int argc, char *argv[])
 			fuse_opt_add_arg(&args, "-o") ||
 			fuse_opt_add_arg(&args, "allow_other,default_permissions") ||
 			fuse_opt_add_arg(&args, fsnameopt.c_str()) ||
-			(fs.opts.kernel_passthrough &&
+			(cgwfs.opts.kernel_passthrough &&
 			 fuse_opt_add_arg(&args, "-onosuid,nodev")) ||
 			(options.count("debug-fuse") &&
 			 fuse_opt_add_arg(&args, "-odebug")))
 		errx(3, "ERROR: Out of memory");
 
-	cgwfs_assign_operations(fs.oper);
+	cgwfs_assign_operations(cgwfs.oper);
 
 	// If we are not redirecting, do not register cachegwfs module
-	int num_modules = !fs.redirect_path.empty();
+	int num_modules = !cgwfs.redirect_path.empty();
 	int start_module = !num_modules;
 	// Optionally chain notifyfs after cachwgwfs module -
 	// operations of the last module chained gets called first.
@@ -1190,12 +1190,12 @@ int main(int argc, char *argv[])
 		auto index_path = options["index_path"].as<string>();
 		auto index_all = !!options.count("index_all");
 		cout << "notifyfs index is " << index_path << endl;
-		nfyfs_init(fs.opts, index_path, index_all);
+		nfyfs_init(cgwfs.opts, index_path, index_all);
 		nfyfs = nfyfs_module();
 		num_modules++;
 	}
-	fuse_passthrough_module *modules[] = { &fs, nfyfs };
+	fuse_passthrough_module *modules[] = { &cgwfs, nfyfs };
 
-	return fuse_passthrough_main(&args, fs.opts, &modules[start_module],
-				     num_modules, sizeof(fs.oper));
+	return fuse_passthrough_main(&args, cgwfs.opts, &modules[start_module],
+				     num_modules, sizeof(cgwfs.oper));
 }
