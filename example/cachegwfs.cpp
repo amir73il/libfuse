@@ -46,6 +46,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <list>
 #include "cxxopts.hpp"
 #include <mutex>
@@ -60,6 +61,7 @@
 #include "notifyfs.h"
 
 using namespace std;
+namespace fs = std::filesystem;
 
 
 enum op {
@@ -971,31 +973,43 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	if (options.count("max_idle_threads"))
 		cgwfs.opts.max_idle_threads = options["max_idle_threads"].as<int>();
 
-	auto rp = realpath(argv[1], NULL);
-	if (!rp)
-		err(1, "ERROR: realpath(\"%s\")", argv[1]);
-	cout << "source is " << rp << endl;
-	cgwfs.opts.source = rp;
+	error_code ec;
+	auto canonical_path = fs::canonical(argv[1], ec);
+	if (ec) {
+		err(1, "ERROR: canonical(\"%s\"): %s", argv[1], ec.message().c_str());
+	}
+	cout << "source is " << canonical_path << endl;
+	cgwfs.opts.source = canonical_path.string();
 
-	auto mp = realpath(argv[2], NULL);
-	if (!mp) {
-		cerr << "realpath(" << argv[2] << ") failed: " << strerror(errno) << endl;
+	canonical_path = fs::canonical(argv[2], ec);
+	if (ec) {
+		cerr << "canonical(" << argv[2] << ") failed: " << ec.message() << endl;
 		exit(1);
 	}
-	cout << "mount point is " << mp << endl;
-	cgwfs.opts.mountpoint = mp;
+	cout << "mount point is " << canonical_path << endl;
+	cgwfs.opts.mountpoint = canonical_path.string();
 
 	if (options.count("redirect_path")) {
 		auto path = options["redirect_path"].as<string>();
-		rp = realpath(path.c_str(), NULL);
-		if (!rp)
-			err(1, "ERROR: realpath(\"%s\")", path.c_str());
-		cout << "redirect path is " << rp << endl;
-		cgwfs.redirect_path = rp;
+		canonical_path = fs::canonical(path, ec);
+		if (ec) {
+			err(1, "ERROR: canonical(\"%s\"): %s", path.c_str(), ec.message().c_str());
+		}
+		cout << "redirect path is " << canonical_path << endl;
+		cgwfs.redirect_path = canonical_path.string();
 	}
 
-	cgwfs.config_file = options["config_file"].as<string>();
-	cout << "config file is " << cgwfs.config_file << endl;
+	if (options.count("config_file")) {
+		auto path = options["config_file"].as<string>();
+		canonical_path = fs::canonical(path, ec);
+		if (ec) {
+			err(1, "ERROR: canonical(\"%s\"): %s", path.c_str(), ec.message().c_str());
+		}
+		cout << "config file is " << canonical_path << endl;
+		cgwfs.config_file = canonical_path.string();
+	} else {
+		cgwfs.config_file = CONFIG_FILE;
+	}
 
 	return options;
 }
