@@ -94,16 +94,21 @@ struct NotifyFs : public fuse_passthrough_module {
 		return atomic_load(&_index);
 	}
 
-	// Add RWFile to the list
-	void add_rwfile(const RWFile *rwfile) {
+	// Add RWFile to the appropriate list based on index
+	void add_rwfile(const RWFile *rwfile, const Index *index) {
 		lock_guard<mutex> lock(_rwfiles_lock);
-		_rwfiles.push_back(rwfile);
+		if (index == this->index().get()) {
+			_rwfiles.push_back(rwfile);
+		} else {
+			_old_rwfiles.push_back(rwfile);
+		}
 	}
 
 	// Remove RWFile from the list
 	void remove_rwfile(const RWFile *rwfile) {
 		lock_guard<mutex> lock(_rwfiles_lock);
 		_rwfiles.remove(rwfile);
+		_old_rwfiles.remove(rwfile);
 	}
 
 private:
@@ -113,6 +118,7 @@ private:
 	// List to track all active RWFile objects
 	mutex _rwfiles_lock;
 	std::list<const RWFile*> _rwfiles;
+	std::list<const RWFile*> _old_rwfiles;  // RWFiles from previous index
 };
 static NotifyFs nfyfs{};
 
@@ -864,7 +870,8 @@ static int nfyfs_unlink(const fuse_path_at &at)
 }
 
 // Helper function called after successful open/create operations
-static int finish_open(const fuse_path_at &at, fuse_file_info *fi, index_op op)
+static int finish_open(const fuse_path_at &at, fuse_file_info *fi, index_op op,
+		       const Index *index)
 {
 	if (op == OP_RW) {
 		// Allocate a new RWFile object and store it in file module state.
@@ -883,8 +890,8 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, index_op op)
 			return -ENOMEM;
 		}
 
-		// Add the RWFile to the list
-		nfyfs.add_rwfile(rwfile);
+		// Add the RWFile to the appropriate list based on index
+		nfyfs.add_rwfile(rwfile, index);
 	}
 
 	return 0;
@@ -899,7 +906,7 @@ static int nfyfs_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return finish_open(at, fi, OP_RW);
+	return finish_open(at, fi, OP_RW, index.get());
 }
 
 static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
@@ -912,7 +919,7 @@ static int nfyfs_open(const fuse_path_at &at, fuse_file_info *fi)
 	if (ret)
 		return ret;
 
-	return finish_open(at, fi, op);
+	return finish_open(at, fi, op, index.get());
 }
 
 static int nfyfs_release(const fuse_path_at &at, fuse_file_info *fi)
@@ -1033,6 +1040,11 @@ bool NotifyFs::set_index_path(const string &index_path)
 		close(dirfd);
 		return false;
 	}
+
+	lock_guard<mutex> rwfiles_lock(_rwfiles_lock);
+	// Move all current RWFiles to old list when index changes
+	_old_rwfiles.splice(_old_rwfiles.end(), _rwfiles);
+
 	return true;
 }
 
