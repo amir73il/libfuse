@@ -147,15 +147,17 @@ public:
 			memcpy(fid.buf, fh.f_handle, fh.handle_bytes);
 		else
 			fid.fh.handle_bytes = 0;
-		reset();
+		reset(0);
+		reset(1);
 	}
 
-	void reset() {
-		_indexed.store(IDX_INIT, memory_order_relaxed);
+	void reset(unsigned id) {
+		bits(id).store(IDX_INIT, memory_order_relaxed);
 	}
 	void set(unsigned id, unsigned flags) {
 		uint64_t new_bits = IDX_BITS(id, flags);
-		uint64_t expected = _indexed.load(memory_order_relaxed);
+		auto& b = bits(id);
+		uint64_t expected = b.load(memory_order_relaxed);
 		uint64_t desired;
 
 		// Auto-invalidate flags referring to old id
@@ -170,20 +172,30 @@ public:
 				// Set new state flags without clearing existing flags
 				desired = expected | new_bits;
 			}
-		} while (!_indexed.compare_exchange_weak(expected, desired,
-							 memory_order_relaxed));
+		} while (!b.compare_exchange_weak(expected, desired,
+						  memory_order_relaxed));
 	}
 	bool test(unsigned id, unsigned mask) {
-		auto v = _indexed.load(memory_order_relaxed);
+		auto v = bits(id).load(memory_order_relaxed);
 		return IDX_VALID(id, v) && IDX_TEST(IDX_FLAGS(v), mask);
 	}
 	unsigned get(unsigned id) {
-		auto v = _indexed.load(memory_order_relaxed);
+		auto v = bits(id).load(memory_order_relaxed);
 		return IDX_VALID(id, v) ? IDX_FLAGS(v) : IDX_INIT;
+	}
+	atomic<uint64_t>& bits(unsigned id) {
+		return _indexed[id & 1];
 	}
 
 private:
-	atomic<uint64_t> _indexed {ATOMIC_VAR_INIT(IDX_INIT)};
+	// State bits for odd and even index ids that may exist at the same time.
+	// We work under the assumption that two threads can be referencing two
+	// subsequent index ids (odd and even) concurrently, but by the time of
+	// the next index change, the old index will not be referenced anymore.
+	atomic<uint64_t> _indexed[2] {
+		ATOMIC_VAR_INIT(IDX_INIT),
+		ATOMIC_VAR_INIT(IDX_INIT)
+	};
 };
 
 #define IDX_STATE(s) (reinterpret_cast<IndexState *>(s))
@@ -694,7 +706,7 @@ static int nfyfs_lookup(const fuse_path_at &at, fuse_entry_param *e)
 	} else if (idx->test(id, IDX_PARENT)) {
 		// This can happen if ancestor was renamed in the source
 		// from an indexed path without indexing the new path
-		idx->reset();
+		idx->reset(id);
 		if (nfyfs.debug())
 			cerr << "ERROR: resetting inconsistent indexed state"
 				<< " parent=" << pino
