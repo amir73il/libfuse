@@ -163,6 +163,7 @@ struct Fs {
     std::string fuse_mount_options;
     bool direct_io;
     bool passthrough;
+    bool readdir_passthrough;
 };
 static Fs fs{};
 
@@ -198,7 +199,12 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
     if (fs.passthrough && conn->capable & FUSE_CAP_PASSTHROUGH)
         conn->want |= FUSE_CAP_PASSTHROUGH;
     else
-        fs.passthrough = false;
+        fs.passthrough = fs.readdir_passthrough = false;
+
+    if (fs.readdir_passthrough && conn->capable & FUSE_CAP_PASSTHROUGH_INO)
+        conn->want |= FUSE_CAP_PASSTHROUGH_INO;
+    else
+        fs.readdir_passthrough = false;
 
     /* Passthrough and writeback cache are conflicting modes */
     if (fs.passthrough)
@@ -660,6 +666,10 @@ static DirHandle *get_dir_handle(fuse_file_info *fi) {
 }
 
 
+static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd,
+                                fuse_file_info *fi, bool is_dir);
+static void do_passthrough_close(fuse_req_t req, fuse_ino_t ino);
+
 static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     Inode& inode = get_inode(ino);
     auto d = new (nothrow) DirHandle;
@@ -690,6 +700,10 @@ static void sfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
         fi->keep_cache = 1;
         fi->cache_readdir = 1;
     }
+
+    if (fs.readdir_passthrough)
+        do_passthrough_open(req, ino, fd, fi, true);
+
     fuse_reply_open(req, fi);
     return;
 
@@ -812,7 +826,7 @@ static void sfs_readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
 
 
 static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
-    (void) ino;
+    do_passthrough_close(req, ino);
     auto d = get_dir_handle(fi);
     delete d;
     fuse_reply_err(req, 0);
@@ -820,18 +834,24 @@ static void sfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 
 static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd,
-                                fuse_file_info *fi) {
+                                fuse_file_info *fi, bool is_dir = false) {
     Inode& inode = get_inode(ino);
+    mode_t ftype = is_dir ? S_IFDIR : S_IFREG;
+
     /* Setup a shared backing file on first open of an inode */
     if (inode.backing_id) {
         if (fs.debug)
             cerr << "DEBUG: reusing shared backing file "
                  << inode.backing_id << " for inode " << ino << endl;
         fi->backing_id = inode.backing_id;
-    } else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
+    } else if (!(inode.backing_id = fuse_passthrough_open(req, fd, ftype))) {
         cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
-             << ", disabling rw passthrough." << endl;
-        fs.passthrough = false;
+             << ", disabling " << (is_dir ? "readdir" : "rw")
+             << " passthrough." << endl;
+        if (is_dir)
+            fs.readdir_passthrough = false;
+        else
+            fs.passthrough = false;
     } else {
         if (fs.debug)
             cerr << "DEBUG: setup shared backing file "
@@ -839,8 +859,10 @@ static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd,
         fi->backing_id = inode.backing_id;
     }
     /* open in passthrough mode must drop old page cache */
-    if (fi->backing_id)
+    if (fi->backing_id) {
         fi->keep_cache = false;
+        fi->cache_readdir = false;
+    }
 }
 
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name,
@@ -955,7 +977,7 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 }
 
 
-static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
+static void do_passthrough_close(fuse_req_t req, fuse_ino_t ino) {
     Inode& inode = get_inode(ino);
     lock_guard<mutex> g {inode.m};
     inode.nopen--;
@@ -971,7 +993,10 @@ static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
         }
         inode.backing_id = 0;
     }
+}
 
+static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
+    do_passthrough_close(req, ino);
     close(fi->fh);
     fuse_reply_err(req, 0);
 }
@@ -1294,6 +1319,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
         ("wbcache", "Enable writeback cache")
         ("nosplice", "Do not use splice(2) to transfer data")
         ("nopassthrough", "Do not use pass-through mode for read/write")
+        ("readdirpassthrough", "Use pass-through mode for readdir")
         ("single", "Run single-threaded")
         ("o", "Mount options (see mount.fuse(5) - only use if you know what "
               "you are doing)", cxxopts::value(mount_options))
@@ -1330,6 +1356,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv) {
 
     fs.nosplice = options.count("nosplice") != 0;
     fs.passthrough = options.count("nopassthrough") == 0;
+    fs.readdir_passthrough = options.count("readdirpassthrough");
     fs.num_threads = options["num-threads"].as<int>();
     fs.clone_fd = options.count("clone-fd");
     fs.direct_io = options.count("direct-io");

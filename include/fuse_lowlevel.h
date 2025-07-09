@@ -1404,9 +1404,10 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
  *
  * @param req request handle
  * @param fd backing file descriptor
+ * @param ftype backing file type
  * @return positive backing id for success, 0 for failure
  */
-int fuse_passthrough_open(fuse_req_t req, int fd);
+int fuse_passthrough_open(fuse_req_t req, int fd, mode_t ftype);
 int fuse_passthrough_close(fuse_req_t req, int backing_id);
 
 /**

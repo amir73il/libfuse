@@ -492,6 +492,18 @@ struct fuse_loop_config_v1 {
 #define FUSE_CAP_PASSTHROUGH      (1 << 29)
 
 /**
+ * Indicates support for passthrough mode for more inode operations.
+ *
+ * If this flag is set in the `capable` field of the `fuse_conn_info`
+ * structure, then the FUSE kernel module supports redirecting some inode
+ * operations to the backing file instead of letting them to be handled
+ * by the FUSE daemon.
+ *
+ * This feature is disabled by default.
+ */
+#define FUSE_CAP_PASSTHROUGH_INO  (1 << 30)
+
+/**
  * Ioctl flags
  *
  * FUSE_IOCTL_COMPAT: 32bit compat ioctl on 64bit machine

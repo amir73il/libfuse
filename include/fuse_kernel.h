@@ -215,6 +215,12 @@
  *  7.40
  *  - add max_stack_depth to fuse_init_out, add FUSE_PASSTHROUGH init flag
  *  - add backing_id to fuse_open_out, add FOPEN_PASSTHROUGH open flag
+ *
+ *  ...
+ *
+ *  7.45
+ *  - add FUSE_PASSTHROUGH_INO
+ *  - add ops_mask field to struct fuse_backing_map
  */
 
 #ifndef _LINUX_FUSE_H
@@ -456,6 +462,8 @@ struct fuse_file_lock {
 #define FUSE_HAS_EXPIRE_ONLY	(1ULL << 35)
 #define FUSE_DIRECT_IO_ALLOW_MMAP (1ULL << 36)
 #define FUSE_PASSTHROUGH	(1ULL << 37)
+/* ... */
+#define FUSE_PASSTHROUGH_INO    (1ULL << 43)
 
 /* Obsolete alias for FUSE_DIRECT_IO_ALLOW_MMAP */
 #define FUSE_DIRECT_IO_RELAX	FUSE_DIRECT_IO_ALLOW_MMAP
@@ -1060,8 +1068,15 @@ struct fuse_notify_retrieve_in {
 struct fuse_backing_map {
 	int32_t		fd;
 	uint32_t	flags;
-	uint64_t	padding;
+	uint64_t	ops_mask;
 };
+
+#define FUSE_PASSTHROUGH_OP(op) (1ULL << ((op) - 1))
+
+/* op bits for fuse_backing_map ops_mask */
+#define FUSE_PASSTHROUGH_OP_READ	FUSE_PASSTHROUGH_OP(FUSE_READ)
+#define FUSE_PASSTHROUGH_OP_WRITE	FUSE_PASSTHROUGH_OP(FUSE_WRITE)
+#define FUSE_PASSTHROUGH_OP_READDIR	FUSE_PASSTHROUGH_OP(FUSE_READDIR)
 
 /* Device ioctls: */
 #define FUSE_DEV_IOC_MAGIC		229

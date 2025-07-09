@@ -931,13 +931,14 @@ static void fuse_reply_errno(fuse_req_t req, int res)
 static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd, bool is_dir)
 {
 	auto ino = inode.ino();
+	mode_t ftype = is_dir ? S_IFDIR : S_IFREG;
 
 	if (inode.backing_id) {
 		if (fs.debug())
 			cerr << "DEBUG: reusing shared backing file "
 				<< inode.backing_id << " for inode " << ino << endl;
 		return inode.backing_id;
-	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
+	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd, ftype))) {
 		cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
 			<< ", disabling " << (is_dir ? "readdir" : "kernel")
 			<< " passthrough." << endl;
@@ -1005,11 +1006,11 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 	if (!backing_id)
 		return  false;
 
-	// Do not clean cache on open of kernel passthrough fd and
+	// Do not keep cache on open of kernel passthrough fd and
 	// do not call flush on close of kernel passthrough fd
 	// readdir passthrough does not use readdir cache
 	fi->backing_id = backing_id;
-	fi->keep_cache = true;
+	fi->keep_cache = false;
 	fi->noflush = true;
 	if (is_dir)
 		fi->cache_readdir = false;
@@ -1038,10 +1039,20 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 		if (conn->capable & FUSE_CAP_PASSTHROUGH)
 			conn->want |= FUSE_CAP_PASSTHROUGH;
 		else
-			fs.opts.kernel_passthrough = false;
+			fs.opts.kernel_passthrough = fs.opts.readdir_passthrough = false;
 	}
 	cout << "INFO: kernel read/write passthrough "
 		<< (fs.opts.kernel_passthrough ? "enabled" : "disabled" ) << endl;
+
+	// Check availability of kernel readdir passthrough feature
+	if (fs.opts.readdir_passthrough) {
+		if (conn->capable & FUSE_CAP_PASSTHROUGH_INO)
+			conn->want |= FUSE_CAP_PASSTHROUGH_INO;
+		else
+			fs.opts.readdir_passthrough = false;
+	}
+	cout << "INFO: kernel readdir passthrough "
+		<< (fs.opts.readdir_passthrough ? "enabled" : "disabled" ) << endl;
 
 	/* Passthrough and writeback cache are conflicting modes */
 	if (fs.opts.kernel_passthrough)

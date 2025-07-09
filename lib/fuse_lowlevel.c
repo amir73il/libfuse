@@ -471,11 +471,12 @@ int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 	return send_reply_ok(req, linkname, strlen(linkname));
 }
 
-int fuse_passthrough_open(fuse_req_t req, int fd)
+int fuse_passthrough_open(fuse_req_t req, int fd, mode_t ftype)
 {
 	struct fuse_backing_map map = { .fd = fd };
 	int ret;
 
+	map.ops_mask = S_ISDIR(ftype) ? FUSE_PASSTHROUGH_OP_READDIR : 0;
 	ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_OPEN, &map);
 	if (ret <= 0) {
 		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_open: %s\n", strerror(errno));
@@ -2057,8 +2058,11 @@ void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			se->conn.capable |= FUSE_CAP_DIRECT_IO_ALLOW_MMAP;
 		if (arg->minor >= 38 || (inargflags & FUSE_HAS_EXPIRE_ONLY))
 			se->conn.capable |= FUSE_CAP_EXPIRE_ONLY;
-		if (inargflags & FUSE_PASSTHROUGH)
+		if (inargflags & FUSE_PASSTHROUGH) {
 			se->conn.capable |= FUSE_CAP_PASSTHROUGH;
+			if (inargflags & FUSE_PASSTHROUGH_INO)
+				se->conn.capable |= FUSE_CAP_PASSTHROUGH_INO;
+		}
 	} else {
 		se->conn.max_readahead = 0;
 	}
@@ -2195,6 +2199,8 @@ void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		outargflags |= FUSE_DIRECT_IO_ALLOW_MMAP;
 	if (se->conn.want & FUSE_CAP_PASSTHROUGH) {
 		outargflags |= FUSE_PASSTHROUGH;
+		if (se->conn.want & FUSE_CAP_PASSTHROUGH_INO)
+			outargflags |= FUSE_PASSTHROUGH_INO;
 		/*
 		 * outarg.max_stack_depth includes the fuse stack layer,
 		 * so it is one more than max_backing_stack_depth.
