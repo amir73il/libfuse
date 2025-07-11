@@ -106,6 +106,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.kernel_passthrough = !options.count("nopassthrough");
 	opts.readdir_passthrough = options.count("readdirpassthrough");
+	// if passing through readdir, we do not get readdirplus, so
+	// passthrough also stat and getxattr for faster find/ls -l
+	opts.iops_passthrough = opts.readdir_passthrough;
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
 	// With --nocache also do not allow keeping open fds
 	if (options.count("nocache")) {

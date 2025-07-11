@@ -928,21 +928,26 @@ static void fuse_reply_errno(fuse_req_t req, int res)
 
 
 /* Called with inode mutex locked */
-static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd, bool is_dir)
+static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd, mode_t mode)
 {
+	bool is_iops = (mode & S_ISVTX);
+	bool is_dir = S_ISDIR(mode);
 	auto ino = inode.ino();
-	mode_t ftype = is_dir ? S_IFDIR : S_IFREG;
+	string what = string(" ") +
+		(is_iops ? "iops" : (is_dir ? "readdir" : "kernel")) + " passthrough.";
 
 	if (inode.backing_id) {
 		if (fs.debug())
 			cerr << "DEBUG: reusing shared backing file "
-				<< inode.backing_id << " for inode " << ino << endl;
+				<< inode.backing_id << " for inode " << ino
+				<< what << endl;
 		return inode.backing_id;
-	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd, ftype))) {
+	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd, mode))) {
 		cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
-			<< ", disabling " << (is_dir ? "readdir" : "kernel")
-			<< " passthrough." << endl;
-		if (is_dir)
+			<< ", disabling " << what << endl;
+		if (is_iops)
+			fs.opts.iops_passthrough = false;
+		else if (is_dir)
 			fs.opts.readdir_passthrough = false;
 		else
 			fs.opts.kernel_passthrough = false;
@@ -950,7 +955,8 @@ static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd, bool is_
 	} else {
 		if (fs.debug())
 			cerr << "DEBUG: setup shared backing file "
-				<< inode.backing_id << " for inode " << ino << endl;
+				<< inode.backing_id << " for inode " << ino
+				<< what << endl;
 		return inode.backing_id;
 	}
 }
@@ -1002,9 +1008,14 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 
 	// Setup a shared backing file on first open of an inode
 	auto fd = get_file_fd(fi);
-	auto backing_id = inode_passthrough_open(req, inode, fd, is_dir);
+	mode_t mode = is_dir ? S_IFDIR : S_IFREG;
+	// if iops_passthrough is enabled, raise the sticky bit to
+	// indicate that this is a permanent backing inode setup
+	if (fs.opts.iops_passthrough && ino != FUSE_ROOT_ID)
+		mode |= S_ISVTX;
+	auto backing_id = inode_passthrough_open(req, inode, fd, mode);
 	if (!backing_id)
-		return  false;
+		return false;
 
 	// Do not keep cache on open of kernel passthrough fd and
 	// do not call flush on close of kernel passthrough fd
@@ -1036,23 +1047,28 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 
 	// Check availability of kernel read/write passthrough feature
 	if (fs.opts.kernel_passthrough) {
-		if (conn->capable & FUSE_CAP_PASSTHROUGH)
+		if (conn->capable & FUSE_CAP_PASSTHROUGH) {
 			conn->want |= FUSE_CAP_PASSTHROUGH;
-		else
-			fs.opts.kernel_passthrough = fs.opts.readdir_passthrough = false;
+		} else {
+			fs.opts.readdir_passthrough = false;
+			fs.opts.kernel_passthrough = false;
+			fs.opts.iops_passthrough = false;
+		}
 	}
 	cout << "INFO: kernel read/write passthrough "
 		<< (fs.opts.kernel_passthrough ? "enabled" : "disabled" ) << endl;
 
-	// Check availability of kernel readdir passthrough feature
-	if (fs.opts.readdir_passthrough) {
+	// Check availability of kernel readdir/iops passthrough feature
+	if (fs.opts.iops_passthrough || fs.opts.readdir_passthrough) {
 		if (conn->capable & FUSE_CAP_PASSTHROUGH_INO)
 			conn->want |= FUSE_CAP_PASSTHROUGH_INO;
 		else
-			fs.opts.readdir_passthrough = false;
+			fs.opts.iops_passthrough = fs.opts.readdir_passthrough = false;
 	}
 	cout << "INFO: kernel readdir passthrough "
 		<< (fs.opts.readdir_passthrough ? "enabled" : "disabled" ) << endl;
+	cout << "INFO: kernel iops passthrough "
+		<< (fs.opts.iops_passthrough ? "enabled" : "disabled" ) << endl;
 
 	/* Passthrough and writeback cache are conflicting modes */
 	if (fs.opts.kernel_passthrough)
@@ -1093,18 +1109,36 @@ static int do_getattr(const fuse_path_at &at, struct stat *attr, fuse_file_info 
 static void pfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 {
 	(void)fi;
-	InodeRef inode(get_inode(ino));
-	if (inode.error(req))
+	auto inode_ptr = get_inode(ino);
+	Inode &inode = *inode_ptr;
+	InodeRef inode_ref(inode_ptr);
+	if (inode_ref.error(req))
 		return;
 
-	fuse_empty_path_at at(req, inode);
+	fuse_empty_path_at at(req, inode_ref);
 	struct stat attr;
 	auto res = call_op(getattr)(at, &attr, fi);
 	if (res == -1) {
 		fuse_reply_err(req, errno);
 		return;
 	}
-	fuse_reply_attr(req, &attr, fs.opts.attr_timeout);
+	int backing_id = 0;
+	if (fs.opts.iops_passthrough && !at.inode().is_root()) {
+		lock_guard<mutex> g {inode.m};
+		// allocate backing_id for the lifetime of the inode
+		if (!inode.backing_id)
+			inode.nopen++;
+		// Use the sticky bit to indicate that we are setting up
+		// a permanent backing inode for the lifetime of the inode
+		backing_id = inode_passthrough_open(req, inode,
+						    inode_ref.get_fd(),
+						    attr.st_mode | S_ISVTX);
+		if (!inode.backing_id)
+			inode.nopen--;
+	}
+	// Negative attr_timeout stands for permanent passthrough to backing id
+	fuse_reply_attr(req, &attr, backing_id ? (double)-backing_id :
+						 fs.opts.attr_timeout);
 }
 
 static int do_chmod(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)

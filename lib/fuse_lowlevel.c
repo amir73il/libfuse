@@ -353,6 +353,14 @@ static unsigned int calc_timeout_nsec(double t)
 		return (unsigned int) (f * 1.0e9);
 }
 
+static unsigned int calc_timeout_backing_id(double t)
+{
+	if (t >= 0.0 || t < -INT_MAX)
+		return 0;
+	else
+		return (unsigned int) -t;
+}
+
 static void fill_entry(struct fuse_entry_out *arg,
 		       const struct fuse_entry_param *e)
 {
@@ -461,6 +469,7 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 	memset(&arg, 0, sizeof(arg));
 	arg.attr_valid = calc_timeout_sec(attr_timeout);
 	arg.attr_valid_nsec = calc_timeout_nsec(attr_timeout);
+	arg.backing_id = calc_timeout_backing_id(attr_timeout);
 	convert_stat(attr, &arg.attr);
 
 	return send_reply_ok(req, &arg, size);
@@ -471,12 +480,16 @@ int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 	return send_reply_ok(req, linkname, strlen(linkname));
 }
 
-int fuse_passthrough_open(fuse_req_t req, int fd, mode_t ftype)
+int fuse_passthrough_open(fuse_req_t req, int fd, mode_t mode)
 {
 	struct fuse_backing_map map = { .fd = fd };
 	int ret;
 
-	map.ops_mask = S_ISDIR(ftype) ? FUSE_PASSTHROUGH_OP_READDIR : 0;
+	map.ops_mask = S_ISDIR(mode) ? FUSE_PASSTHROUGH_OP_READDIR : 0;
+	if (mode & S_ISVTX) {
+		/* setup getattr passthrough for the lifetime of the inode */
+		map.ops_mask |= FUSE_PASSTHROUGH_OP_GETATTR;
+	}
 	ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_OPEN, &map);
 	if (ret <= 0) {
 		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_open: %s\n", strerror(errno));
