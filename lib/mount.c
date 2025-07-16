@@ -557,7 +557,7 @@ static int fuse_mount_sys(const char *mnt, struct mount_opts *mo,
 		 * Maybe kernel doesn't support unprivileged mounts, in this
 		 * case try falling back to fusermount3
 		 */
-		if (errno == EPERM) {
+		if (errno == EPERM || errno == EACCES) {
 			res = -2;
 		} else {
 			int errno_save = errno;
