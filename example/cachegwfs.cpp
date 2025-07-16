@@ -540,6 +540,13 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 	if (redirected) {
 		// Store AT_FDCWD state to indicate that open was redirected
 		rfd = AT_FDCWD;
+		// When kernel passthrough is supported, direct_io is set by
+		// passthrough library in file_passthrough_open().
+		// When kernel passthrough is not supported, we still want to
+		// bypass page cache when redirecting read/write.
+		// In case we are redirecting once due to should_redirect_once(),
+		// the page cache remains valid for following non-redirected open.
+		fi->direct_io = true;
 	} else if (check_safe_fd(fi, op) == -1) {
 		fail = true;
 	} else if (cgwfs.redirect_op(OP_COPY)) {
