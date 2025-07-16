@@ -1008,14 +1008,13 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 	if (!backing_id)
 		return  false;
 
-	// Do not clean cache on open of kernel passthrough fd and
+	// Do not keep cache on open of kernel passthrough fd and
 	// do not call flush on close of kernel passthrough fd
 	// readdir passthrough does not use readdir cache
 	fi->backing_id = backing_id;
-	fi->keep_cache = true;
+	fi->keep_cache = false;
+	fi->cache_readdir = false;
 	fi->noflush = true;
-	if (is_dir)
-		fi->cache_readdir = false;
 	return true;
 }
 
@@ -1871,6 +1870,10 @@ static void pfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 	// Passthrough readdir by library unless module clears the flag
 	// during opendir and implements the readdir operation.
 	fi->passthrough_readdir = 1;
+	if (!fs.opts.nocache) {
+		fi->keep_cache = 1;
+		fi->cache_readdir = 1;
+	}
 
 	fuse_path_at at(req, inode, ".");
 	auto res = call_op(opendir)(at, fi);
@@ -1879,10 +1882,6 @@ static void pfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		return;
 	}
 
-	if (!fs.opts.nocache) {
-		fi->keep_cache = 1;
-		fi->cache_readdir = 1;
-	}
 	file_passthrough_open(req, ino, fi, true);
 	fuse_reply_open(req, fi);
 	return;
@@ -2175,6 +2174,7 @@ static void pfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 	// during open and implements the {read,write}_buf operations.
 	fi->passthrough_read = 1;
 	fi->passthrough_write = 1;
+	fi->keep_cache = !fs.opts.nocache;
 
 	/* Unfortunately we cannot use inode.fd, because this was opened
 	   with O_PATH (so it doesn't allow read/write access). */
@@ -2184,7 +2184,6 @@ static void pfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		fuse_reply_fd_err(req, errno);
 		return;
 	}
-	fi->keep_cache = !fs.opts.nocache;
 	file_passthrough_open(req, ino, fi);
 	fuse_reply_open(req, fi);
 }
