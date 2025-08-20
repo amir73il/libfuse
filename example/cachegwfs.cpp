@@ -350,6 +350,8 @@ static fuse_path_at get_fd_path_op(const fuse_path_at &in, enum op op)
 			linkname[n] = 0;
 			cerr << "ERROR: redirect " << op_name(op) << "(" << name << "): "
 				<< linkname << " not under " << cgwfs.opts.source << endl;
+			// Return an invalid path ao syscalls will fail
+			return fuse_invalid_path_at(in);
 		}
 		// Return a copy of the path we got
 		return in;

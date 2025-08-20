@@ -250,6 +250,12 @@ struct fuse_path_at_cwd : fuse_path_at {
 		fuse_path_at(at.req(), at.inode(), path, true) {}
 };
 
+/* Invalid path that would fail any fs operation */
+struct fuse_invalid_path_at : fuse_path_at_cwd {
+	fuse_invalid_path_at(const fuse_path_at &at) :
+		fuse_path_at_cwd(at, "/dev/null/invalid") {}
+};
+
 void __trace_fd_path_at(const fuse_path_at &in, const char *caller);
 
 #define trace_fd_path_at(in) \
