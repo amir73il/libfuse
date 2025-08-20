@@ -486,8 +486,13 @@ bool fuse_path_at::reconnect() const
 	auto encoder = fs.get_encoder();
 	auto const &fh = *inode().get_file_handle();
 	xfs_fh dir_fh{0};
-	if (!encoder->get_parent_fh(fh, dir_fh.fh))
+
+	if (!encoder->get_parent_fh(fh, dir_fh.fh)) {
+		if (fs.debug())
+			cerr << "DEBUG: reconnect(): no parent fh for inode "
+				<< inode().ino() << endl;
 		return false;
+	}
 
 	auto ino = inode().ino();
 	auto dirfd = open_by_handle_at(fs.root->_fd, &dir_fh.fh, O_DIRECTORY);
@@ -500,11 +505,15 @@ bool fuse_path_at::reconnect() const
 
 	DIR *dp = fdopendir(dirfd);
 	if (dp == NULL) {
+		if (fs.debug())
+			cerr << "ERROR: fdopendir failed for parent of inode "
+				<< ino << ", errno=" << errno << endl;
 		close(dirfd);
 		return false;
 	}
 
 	// look for the child in the parent directory
+	bool found_child = false;
 	while(1) {
 		struct dirent *de;
 		de = readdir(dp);
@@ -516,16 +525,26 @@ bool fuse_path_at::reconnect() const
 			if (!err && fs.debug())
 				cerr << "DEBUG: found child '" << de->d_name
 					<< "' with inode " << ino << endl;
+			found_child = true;
 			break;
 		}
 	}
 	closedir(dp);
 
+	if (!found_child && fs.debug())
+		cerr << "DEBUG: reconnect(): child with inode "
+			<< ino << " not found in parent directory" << endl;
+
 	// close the disconnected fd and reopen the fd hoping to get a connected alias
 	inode().close_fd();
 	inode().open_fd();
 
-	return is_connected();
+	bool connected = is_connected();
+	if (fs.debug())
+		cerr << "DEBUG: reconnect(): after reopen, inode " << ino << " is "
+			<< (connected ? "connected" : "still disconnected") << endl;
+
+	return connected;
 }
 
 bool fuse_path_at::is_connected() const
