@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
 #include <ctype.h>
@@ -87,18 +88,38 @@ int main(int argc, char* argv[])
 {
     DIR* dirp;
     struct dirent* dent;
+    struct stat st;
+    off_t dbits, dbytes;
+
+    if (argc < 2) {
+        usage();
+    }
 
     if (argc > 4 && !strcmp(argv[4], "-d")) {
 	    debug = 1;
 	    argc--;
     }
+
+    if (stat(argv[1], &st) != 0) {
+        perror("failed to stat directory");
+        exit(1);
+    }
+    dbytes = st.st_blocks * 512;
+    if (debug)
+        dprintf("size of %s %ld bytes, estimated %ld entries\n",
+                argv[1], dbytes, dbytes / 32);
+    for (dbits = 1; dbytes; dbits++, dbytes >>= 1);
+
     if (argc > 3) {
-        mbits = atoi(argv[3]);
+        if (argv[3][0] == '-')
+            mbits = dbits ? dbits - 1 : 8;
+        else
+            mbits = atoi(argv[3]);
         if (mbits < 8 || mbits > 32) {
-            fprintf(stderr, "Invalid mbits value %s [8..32]\n", argv[3]);
+            fprintf(stderr, "Invalid mbits value %d [8..32]\n", mbits);
             usage();
         }
-        printf("allocating bloom filter of size 2^%u bytes\n", mbits - 3);
+        printf("allocating bloom filter of size 2^%u bits\n", mbits);
         nwords = 1UL << (mbits - 6);
         bitmap = calloc(nwords, sizeof(uint64_t));
         if (!bitmap) {
@@ -111,11 +132,15 @@ int main(int argc, char* argv[])
     mdigits = (mbits + 3) / 4;
 
     if (argc > 2) {
-        khash = atoi(argv[2]);
+        if (argv[2][0] == '-')
+            khash = (dbits > 15) ? dbits - 14 : 1;
+        else
+            khash = atoi(argv[2]);
         if (khash <= 0 || khash > 20) {
-            fprintf(stderr, "Invalid khash value %s [1..20]\n", argv[2]);
+            fprintf(stderr, "Invalid khash value %d [1..20]\n", khash);
             usage();
         }
+        printf("using %d bloom filter hashes\n", khash);
         argc--;
     }
 
