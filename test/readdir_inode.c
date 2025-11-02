@@ -22,6 +22,7 @@ static uint32_t mask;
 static uint64_t *bitmap = NULL;
 static uint64_t nwords;
 static int debug;
+static int quiet;
 
 #define dprintf(fmt, ...) \
 	if (debug) fprintf(stderr, fmt, ## __VA_ARGS__)
@@ -65,7 +66,8 @@ static void print_ci_hash(char *s)
         b = h & mask;
 	w = b >> 6;
 	v = 1ULL << (b & 63);
-        printf(" %0*x", mdigits, b);
+        if (!quiet)
+            printf("%0*x ", mdigits, b);
         if (bitmap) {
             match = match && bitmap[w] & v;
             dprintf("bitmap[%d] = %016lx | %016lx; ", w, bitmap[w], v);
@@ -73,14 +75,16 @@ static void print_ci_hash(char *s)
         }
     }
     if (match)
-        printf(" collision");
+        printf("%s collision\n", s);
+    else if (!quiet)
+        printf("\n");
     if (debug)
         print_bitmap();
 }
 
 static void usage(void)
 {
-    fprintf(stderr, "Usage: readdir_inode dir [khash] [mbits] [-d]\n");
+    fprintf(stderr, "Usage: readdir_inode dir [khash] [mbits] [-d|-q]\n");
     exit(1);
 }
 
@@ -95,8 +99,15 @@ int main(int argc, char* argv[])
         usage();
     }
 
-    if (argc > 4 && !strcmp(argv[4], "-d")) {
-	    debug = 1;
+    if (argc > 4 && argv[4][0] == '-') {
+            switch (argv[4][1]) {
+            case 'd':
+	        debug = 1;
+	        break;
+            case 'q':
+	        quiet = 1;
+	        break;
+            }
 	    argc--;
     }
 
@@ -158,11 +169,13 @@ int main(int argc, char* argv[])
     dent = readdir(dirp);
     while (dent != NULL) {
         if (strcmp(dent->d_name, ".") != 0 && strcmp(dent->d_name, "..") != 0) {
-            printf("%llu %d %s", (unsigned long long)dent->d_ino,
-                   (int)dent->d_type, dent->d_name);
+            if (!quiet)
+                printf("%llu %d %s ", (unsigned long long)dent->d_ino,
+                       (int)dent->d_type, dent->d_name);
             if (khash)
                 print_ci_hash(dent->d_name);
-	    printf("\n");
+	    else if (!quiet)
+	        printf("\n");
             if ((long long)dent->d_ino < 0)
                fprintf(stderr,"%s : bad d_ino %llu\n",
                         dent->d_name, (unsigned long long)dent->d_ino);
