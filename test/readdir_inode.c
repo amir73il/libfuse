@@ -27,7 +27,7 @@ static int quiet;
 #define dprintf(fmt, ...) \
 	if (debug) fprintf(stderr, fmt, ## __VA_ARGS__)
 
-static uint64_t ci_hash(char *s)
+static uint64_t ci_hash(char *s, ino_t pino)
 {
     static char lowername[NAME_MAX+1];
     char *p = lowername;
@@ -36,7 +36,8 @@ static uint64_t ci_hash(char *s)
     for (l = 0; *s; ++l, ++s, ++p)
         *p = tolower((unsigned char)*s);
 
-    return wyhash(lowername, l, 0, _wyp);
+    // Use parent ino as seed
+    return wyhash(lowername, l, pino, _wyp);
 }
 
 static void print_bitmap(void)
@@ -52,9 +53,9 @@ static void print_bitmap(void)
     dprintf("\n");
 }
 
-static void print_ci_hash(char *s)
+static int print_ci_hash(char *s, ino_t pino)
 {
-    uint64_t wh = ci_hash(s);
+    uint64_t wh = ci_hash(s, pino);
     uint32_t h = (uint32_t)wh;
     uint32_t h2 = (uint32_t)(wh >> 32);
     uint32_t b, w;
@@ -80,6 +81,7 @@ static void print_ci_hash(char *s)
         printf("\n");
     if (debug)
         print_bitmap();
+    return match;
 }
 
 static void usage(void)
@@ -88,12 +90,29 @@ static void usage(void)
     exit(1);
 }
 
+static char *get_dirname(void)
+{
+    static char path[PATH_MAX+1];
+    char *dirname = fgets(path, PATH_MAX, stdin);
+    int len;
+
+    if (dirname) {
+        len = strlen(dirname);
+        if (len && dirname[len - 1] != 0)
+            dirname[len - 1] = 0;
+    }
+    return dirname;
+}
+
 int main(int argc, char* argv[])
 {
     DIR* dirp;
     struct dirent* dent;
     struct stat st;
     off_t dbits, dbytes;
+    char *dirname;
+    int ndirent, ncolls;
+    int totdirent = 0, totcolls = 0;
 
     if (argc < 2) {
         usage();
@@ -111,8 +130,17 @@ int main(int argc, char* argv[])
 	    argc--;
     }
 
-    if (stat(argv[1], &st) != 0) {
-        perror("failed to stat directory");
+    if (argv[1][0] == '-') {
+        dirname = get_dirname();
+    } else {
+        dirname = argv[1];
+    }
+    if (!dirname) {
+        perror("failed to read directory path");
+        exit(1);
+    }
+    if (stat(dirname, &st) != 0) {
+        fprintf(stderr, "failed to stat directory %s\n", dirname);
         exit(1);
     }
     dbytes = st.st_blocks * 512;
@@ -159,21 +187,24 @@ int main(int argc, char* argv[])
         usage();
     }
 
-    dirp = opendir(argv[1]);
+opendir:
+    ndirent = ncolls = 0;
+    dirp = opendir(dirname);
     if (dirp == NULL) {
-        perror("failed to open directory");
+        fprintf(stderr, "failed to open directory %s\n", dirname);
         exit(1);
     }
 
     errno = 0;
     dent = readdir(dirp);
     while (dent != NULL) {
+        ndirent++;
         if (strcmp(dent->d_name, ".") != 0 && strcmp(dent->d_name, "..") != 0) {
             if (!quiet)
                 printf("%llu %d %s ", (unsigned long long)dent->d_ino,
                        (int)dent->d_type, dent->d_name);
             if (khash)
-                print_ci_hash(dent->d_name);
+                ncolls += print_ci_hash(dent->d_name, st.st_ino);
 	    else if (!quiet)
 	        printf("\n");
             if ((long long)dent->d_ino < 0)
@@ -184,7 +215,7 @@ int main(int argc, char* argv[])
                         dent->d_name, (int)dent->d_type);
         } else {
             if (dent->d_type != DT_DIR)
-               fprintf(stderr,"%s : bad d_type %d\n",
+                fprintf(stderr,"%s : bad d_type %d\n",
                         dent->d_name, (int)dent->d_type);
         }
         dent = readdir(dirp);
@@ -195,6 +226,22 @@ int main(int argc, char* argv[])
     }
 
     closedir(dirp);
+
+    if (argv[1][0] == '-') {
+        totcolls += ncolls;
+        totdirent += ndirent;
+        printf("ino %12lu: %d/%d; total: %d/%d bloom filter collisions at %s\n",
+               st.st_ino, ncolls, ndirent, totcolls, totdirent, dirname);
+        dirname = get_dirname();
+        if (!dirname)
+            return 0;
+
+        if (stat(dirname, &st) != 0) {
+            fprintf(stderr, "failed to stat directory %s\n", dirname);
+            exit(1);
+        }
+        goto opendir;
+    }
 
     return 0;
 }
