@@ -652,8 +652,8 @@ void Fs::get_root_fh(ino_t src_ino)
 	struct xfs_fh xfs_fh{src_ino};
 	at_connectable = fs.opts.connected_fd ? AT_HANDLE_CONNECTABLE : 0;
 retry:
-	auto ret = name_to_handle_at(root->_fd, "", &xfs_fh.fh, &mount_id,
-				     AT_EMPTY_PATH | at_connectable);
+	auto ret = name_to_handle_at(root->_fd, ".", &xfs_fh.fh, &mount_id,
+				     at_connectable);
 	if (ret < 0 && at_connectable) {
 		// Maybe connectable fh not supported - retry with non-connectable
 		cout << "INFO: connectable file handles not supported by kernel" << endl;
@@ -1261,8 +1261,17 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	int mount_id;
 	struct xfs_fh xfs_fh{src_ino};
 	if (fs.fhandles) {
-		res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id,
-					AT_EMPTY_PATH | fs.at_connectable);
+		if (parent_ino) {
+			// We require a connectable file handle if parent is known
+			// and AT_HANDLE_CONNECTABLE does not allow AT_EMPTY_PATH
+			res = name_to_handle_at(dirfd, name, &xfs_fh.fh, &mount_id,
+						fs.at_connectable);
+		} else {
+			// file handle of ".." of directory is always connectable
+			// file handle of "." with unknown parent may not be connectable
+			res = name_to_handle_at(newfd, "", &xfs_fh.fh, &mount_id,
+						AT_EMPTY_PATH);
+		}
 		if (res == -1) {
 			auto saveerr = errno;
 			if (fs.debug())
