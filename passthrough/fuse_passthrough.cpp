@@ -1097,7 +1097,9 @@ static int do_getattr(const fuse_path_at &at, struct stat *attr, fuse_file_info 
 	if (fi)
 		return fstat(get_file_fd(fi), attr);
 
-	return fstatat(at.dirfd(), at.path(), attr, at.flags());
+	return at.with_cred([&](){
+		return fstatat(at.dirfd(), at.path(), attr, at.flags());
+	});
 }
 
 static void pfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
@@ -1119,11 +1121,9 @@ static void pfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 
 static int do_access(const fuse_path_at &at, int mask)
 {
-	auto c = fuse_req_ctx(at.req());
-	{
-		Cred cred(c->uid, c->gid);
+	return at.with_cred([&](){
 		return faccessat(at.dirfd(), at.path(), mask, at.flags());
-	}
+	});
 }
 
 static void pfs_access(fuse_req_t req, fuse_ino_t ino, int mask)
@@ -1145,13 +1145,17 @@ static int do_chmod(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 	// Convert empty path to magic symlink
 	fuse_path_at_cwd out(in);
 	// AT_SYMLINK_NOFOLLOW not implemented
-	return fchmodat(out.dirfd(), out.path(), mode, 0);
+	return out.with_cred([&](){
+		return fchmodat(out.dirfd(), out.path(), mode, 0);
+	});
 }
 
 static int do_chown(const fuse_path_at &at, uid_t uid, gid_t gid, fuse_file_info *fi)
 {
 	(void)fi;
-	return fchownat(at.dirfd(), at.path(), uid, gid, at.flags());
+	return at.with_cred([&](){
+		return fchownat(at.dirfd(), at.path(), uid, gid, at.flags());
+	});
 }
 
 static int do_truncate(const fuse_path_at &in, off_t size, fuse_file_info *fi)
@@ -1165,7 +1169,9 @@ static int do_truncate(const fuse_path_at &in, off_t size, fuse_file_info *fi)
 		errno = EINVAL;
 		return -1;
 	}
-	return truncate(out.path(), size);
+	return out.with_cred([&](){
+		return truncate(out.path(), size);
+	});
 }
 
 static int do_utimens(const fuse_path_at &in, const struct timespec tv[2],
@@ -1177,7 +1183,9 @@ static int do_utimens(const fuse_path_at &in, const struct timespec tv[2],
 #ifdef HAVE_UTIMENSAT
 		// Convert empty path to magic symlink
 		fuse_path_at_cwd out(in);
-		return utimensat(out.dirfd(), out.path(), tv, out.flags());
+		return out.with_cred([&](){
+			return utimensat(out.dirfd(), out.path(), tv, out.flags());
+		});
 #else
 		errno = EOPNOTSUPP;
 		return -1;
@@ -1192,18 +1200,15 @@ static void pfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 	if (inode.error(req))
 		return;
 
-	auto c = fuse_req_ctx(req);
 	fuse_empty_path_at at(req, inode);
 	int res;
 
 	if (valid & FUSE_SET_ATTR_MODE) {
-		Cred cred(c->uid, c->gid);
 		res = call_op(chmod)(at, attr->st_mode, fi);
 		if (res == -1)
 			goto out_err;
 	}
 	if (valid & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
-		Cred cred(c->uid, c->gid);
 		uid_t uid = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : NULL_UID;
 		gid_t gid = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : NULL_GID;
 
@@ -1217,7 +1222,6 @@ static void pfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 			goto out_err;
 	}
 	if (valid & (FUSE_SET_ATTR_ATIME | FUSE_SET_ATTR_MTIME)) {
-		Cred cred(c->uid, c->gid);
 		struct timespec tv[2];
 
 		tv[0].tv_sec = 0;
@@ -1260,8 +1264,10 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	} else if (strcmp(name, "..") == 0) {
 		newfd = openat(dirfd, name, O_PATH | O_NOFOLLOW);
 	} else {
-		newfd = openat(dirfd, name, O_PATH | O_NOFOLLOW);
 		parent_ino = at.inode().ino();
+		newfd = at.with_cred([&](){
+			return openat(dirfd, name, O_PATH | O_NOFOLLOW);
+		});
 	}
 	if (newfd == -1)
 		return errno;
@@ -1496,6 +1502,14 @@ static tuple<bool, gid_t, gid_t> get_sgid_and_gids(const fuse_path_at &at)
 	return { parent_sgid, parent_gid, st.st_gid };
 }
 
+// Wraps an operation in Cred scope to set effective UID/GID
+int fuse_path_at::with_cred(function<int()> op) const
+{
+	auto c = fuse_req_ctx(_req);
+	Cred cred(c->uid, c->gid);
+	return op();
+}
+
 // Assumes that op returns -1 on failure
 static int as_user(const fuse_path_at &at, const string &opname,
 		   function<int()> op)
@@ -1646,8 +1660,10 @@ static void pfs_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
 
 static int do_link(const fuse_path_at &oldat, const fuse_path_at &newat)
 {
-	return linkat(oldat.dirfd(), oldat.path(), newat.dirfd(), newat.path(),
-			oldat.flags(false));
+	return oldat.with_cred([&](){
+		return linkat(oldat.dirfd(), oldat.path(), newat.dirfd(), newat.path(),
+			      oldat.flags(false));
+	});
 }
 
 static void pfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
@@ -1687,7 +1703,9 @@ static void pfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 
 static int do_rmdir(const fuse_path_at &at)
 {
-	return unlinkat(at.dirfd(), at.path(), AT_REMOVEDIR);
+	return at.with_cred([&](){
+		return unlinkat(at.dirfd(), at.path(), AT_REMOVEDIR);
+	});
 }
 
 static void pfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name)
@@ -1709,8 +1727,10 @@ static int do_rename(const fuse_path_at &oldat, const fuse_path_at &newat,
 		return -1;
 	}
 
-	return renameat(oldat.dirfd(), oldat.path(),
-			newat.dirfd(), newat.path());
+	return oldat.with_cred([&](){
+		return renameat(oldat.dirfd(), oldat.path(),
+				newat.dirfd(), newat.path());
+	});
 }
 
 static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup);
@@ -1742,7 +1762,9 @@ static void pfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 
 static int do_unlink(const fuse_path_at &at)
 {
-	return unlinkat(at.dirfd(), at.path(), 0);
+	return at.with_cred([&](){
+		return unlinkat(at.dirfd(), at.path(), 0);
+	});
 }
 
 static void pfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
@@ -1834,7 +1856,9 @@ static void pfs_forget_multi(fuse_req_t req, size_t count,
 
 static int do_readlink(const fuse_path_at &at, char *buf, size_t size)
 {
-	return readlinkat(at.dirfd(), "", buf, size);
+	return at.with_cred([&](){
+		return readlinkat(at.dirfd(), "", buf, size);
+	});
 }
 
 static void pfs_readlink(fuse_req_t req, fuse_ino_t ino)
@@ -1881,7 +1905,9 @@ static Dir *get_dir(fuse_file_info *fi)
 
 static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 {
-	auto fd = openat(at.dirfd(), at.path(), fi->flags | O_DIRECTORY);
+	int fd = at.with_cred([&](){
+		return openat(at.dirfd(), at.path(), fi->flags | O_DIRECTORY);
+	});
 	if (fd == -1)
 		return -1;
 
@@ -2181,7 +2207,9 @@ static int do_open(const fuse_path_at &in, fuse_file_info *fi)
 	auto flags = fi->flags;
 	if (out.follow())
 	       flags &= ~O_NOFOLLOW;
-	auto fd = openat(out.dirfd(), out.path(), flags);
+	int fd = out.with_cred([&](){
+		return openat(out.dirfd(), out.path(), flags);
+	});
 	if (fd == -1)
 		return -1;
 
@@ -2566,8 +2594,10 @@ static int do_setxattr(const fuse_path_at &in, const char *name, const char *val
 		errno = EINVAL;
 		return -1;
 	}
-	return (out.follow() ? setxattr : lsetxattr)
-		(out.path(), name, value, size, flags);
+	return out.with_cred([&](){
+		return (out.follow() ? setxattr : lsetxattr)
+			(out.path(), name, value, size, flags);
+	});
 }
 
 static void pfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -2578,12 +2608,7 @@ static void pfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 		return;
 
 	fuse_empty_path_at at(req, inode);
-	auto c = fuse_req_ctx(req);
-	int res;
-	{
-		Cred cred(c->uid, c->gid);
-		res = call_op(setxattr)(at, name, value, size, flags);
-	}
+	int res = call_op(setxattr)(at, name, value, size, flags);
 	fuse_reply_errno(req, res);
 }
 
@@ -2596,7 +2621,9 @@ static int do_removexattr(const fuse_path_at &in, const char *name)
 		errno = EINVAL;
 		return -1;
 	}
-	return (out.follow() ? removexattr : lremovexattr)(out.path(), name);
+	return out.with_cred([&](){
+		return (out.follow() ? removexattr : lremovexattr)(out.path(), name);
+	});
 }
 
 static void pfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name)
@@ -2606,12 +2633,7 @@ static void pfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name)
 		return;
 
 	fuse_empty_path_at at(req, inode);
-	auto c = fuse_req_ctx(req);
-	int res;
-	{
-		Cred cred(c->uid, c->gid);
-		res = call_op(removexattr)(at, name);
-	}
+	int res = call_op(removexattr)(at, name);
 	fuse_reply_errno(req, res);
 }
 #endif

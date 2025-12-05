@@ -194,6 +194,9 @@ struct fuse_path_at {
 	virtual fuse_inode& inode() const { return _inode; }
 	virtual const char *proc_path() const { return _proc_path; }
 
+	/* Wraps an operation in Cred scope to set effective UID/GID */
+	int with_cred(std::function<int()> op) const;
+
 	virtual void print_fd_path(const char *caller) const;
 	virtual bool is_connected() const;
 	virtual bool reconnect() const;
