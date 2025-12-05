@@ -74,6 +74,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		("help", "Print help")
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
+		("nopermcache", "Do not use kernel default permissions mode")
+		("noaclcache", "Do not use kernel posix acl cache")
 		("nosplice", "Do not use splice(2) to transfer data")
 		("nopassthrough", "Do not use kernel pass-through mode for read/write")
 		("single", "Run single-threaded");
@@ -104,6 +106,10 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.nocache = options.count("nocache");
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.kernel_passthrough = !options.count("nopassthrough");
+	opts.default_permissions = !options.count("nopermcache");
+	// Kernel POSIX ACL enforcement implies default_permissions
+	// so disable it with either "nopermcache" or "noaclcache"
+	opts.posix_acls = opts.default_permissions && !options.count("noaclcache");
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
 	// With --nocache also do not allow keeping open fds
 	if (options.count("nocache")) {
@@ -135,7 +141,10 @@ int main(int argc, char *argv[]) {
 	// Parse command line options
 	fuse_passthrough_opts opts{};
 	auto options {parse_options(argc, argv, opts)};
-	auto mount_options = "fsname=" + opts.source + ",allow_other,default_permissions";
+	auto mount_options = "fsname=" + opts.source + ",allow_other";
+
+	if (opts.default_permissions)
+		mount_options += ",default_permissions";
 
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);

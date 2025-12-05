@@ -936,6 +936,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		("foreground", "Run in foreground")
 		("nocache", "Disable all caching")
 		("wbcache", "Enable writeback cache")
+		("nopermcache", "Do not use kernel default permissions mode")
+		("noaclcache", "Do not use kernel posix acl cache")
 		("nosplice", "Do not use splice(2) to transfer data")
 		("keepfd", "Keep open fd for all inodes in cache")
 		("nokeepfd", "Do not keep open fd for all inodes in cache")
@@ -966,6 +968,10 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	cgwfs.opts.attr_timeout = cgwfs.opts.nocache ? 0 : 1.0;
 	cgwfs.opts.entry_timeout = cgwfs.opts.attr_timeout;
 	cgwfs.opts.wbcache = !cgwfs.opts.nocache && options.count("wbcache");
+	cgwfs.opts.default_permissions = !options.count("nopermcache");
+	// Kernel POSIX ACL enforcement implies default_permissions
+	// so disable it with either "nopermcache" or "noaclcache"
+	cgwfs.opts.posix_acls = cgwfs.opts.default_permissions && !options.count("noaclcache");
 	// By default library keeps open fds if file handles are not supported,
 	// but user can request keeping open fds and can forbid keeping open fds,
 	// so if file handles are not supported, mount will fail.
@@ -1193,8 +1199,9 @@ int main(int argc, char *argv[])
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
-			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "allow_other,default_permissions") ||
+			fuse_opt_add_arg(&args, "-oallow_other") ||
+			(cgwfs.opts.default_permissions &&
+			 fuse_opt_add_arg(&args, "-odefault_permissions")) ||
 			fuse_opt_add_arg(&args, fsnameopt.c_str()) ||
 			(cgwfs.opts.kernel_passthrough &&
 			 fuse_opt_add_arg(&args, "-onosuid,nodev")) ||

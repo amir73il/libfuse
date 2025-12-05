@@ -1074,7 +1074,7 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 	if (conn->capable & FUSE_CAP_FLOCK_LOCKS)
 		conn->want |= FUSE_CAP_FLOCK_LOCKS;
 
-	if (conn->capable & FUSE_CAP_POSIX_ACL)
+	if (fs.opts.posix_acls && conn->capable & FUSE_CAP_POSIX_ACL)
 		conn->want |= FUSE_CAP_POSIX_ACL;
 
 	if (fs.opts.nosplice) {
@@ -1115,6 +1115,26 @@ static void pfs_getattr(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		return;
 	}
 	fuse_reply_attr(req, &attr, fs.opts.attr_timeout);
+}
+
+static int do_access(const fuse_path_at &at, int mask)
+{
+	auto c = fuse_req_ctx(at.req());
+	{
+		Cred cred(c->uid, c->gid);
+		return faccessat(at.dirfd(), at.path(), mask, at.flags());
+	}
+}
+
+static void pfs_access(fuse_req_t req, fuse_ino_t ino, int mask)
+{
+	InodeRef inode(get_inode(ino));
+	if (inode.error(req))
+		return;
+
+	fuse_empty_path_at at(req, inode);
+	auto res = call_op(access)(at, mask);
+	fuse_reply_errno(req, res);
 }
 
 static int do_chmod(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
@@ -2648,6 +2668,7 @@ static void assign_default_operations(fuse_passthrough_operations &oper)
 	oper.rmdir = do_rmdir;
 	oper.rename = do_rename;
 	oper.getattr = do_getattr;
+	oper.access = do_access;
 	oper.chmod = do_chmod;
 	oper.chown = do_chown;
 	oper.truncate = do_truncate;
@@ -2693,6 +2714,7 @@ static void assign_lowlevel_ops(fuse_lowlevel_ops &pfs_oper)
 	pfs_oper.forget_multi = pfs_forget_multi;
 	pfs_oper.getattr = pfs_getattr;
 	pfs_oper.setattr = pfs_setattr;
+	pfs_oper.access = pfs_access;
 	pfs_oper.readlink = pfs_readlink;
 	pfs_oper.opendir = pfs_opendir;
 	pfs_oper.readdir = pfs_readdir;
@@ -2737,6 +2759,7 @@ static void assign_operations(fuse_passthrough_operations &oper,
 	oper.rmdir = in.rmdir ?: def.rmdir;
 	oper.rename = in.rename ?: def.rename;
 	oper.getattr = in.getattr ?: def.getattr;
+	oper.access = in.access ?: def.access;
 	oper.chmod = in.chmod ?: def.chmod;
 	oper.chown = in.chown ?: def.chown;
 	oper.truncate = in.truncate ?: def.truncate;
