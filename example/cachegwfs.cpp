@@ -941,6 +941,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		("nokeepfd", "Do not keep open fd for all inodes in cache")
 		("nopassthrough", "Do not use pass-through mode in kernel for read/write")
 		("readdirpassthrough", "Use pass-through mode in kernel for readdir")
+		("nopermcache", "Do not use kernel default permissions mode")
+		("posixacl", "Use kernel default posix acl checks")
 		("max_threads", "Max number of libfuse worker threads", cxxopts::value<int>(), "N")
 		("max_idle_threads", "Max number of idle libfuse worker threads", cxxopts::value<int>(), "N")
 		("single", "Run single-threaded");
@@ -977,6 +979,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	cgwfs.opts.connected_fd = !cgwfs.opts.keep_fd;
 	cgwfs.opts.kernel_passthrough = !options.count("nopassthrough");
 	cgwfs.opts.readdir_passthrough = options.count("readdirpassthrough");
+	// Kernel POSIX ACL enforcement implies default_permissions
+	cgwfs.opts.def_posixacl = options.count("posixacl");
+	cgwfs.opts.def_permissions = !options.count("nopermcache") || cgwfs.opts.def_posixacl;
 
 	if (options.count("max_threads"))
 		cgwfs.opts.max_threads = options["max_threads"].as<int>();
@@ -1193,8 +1198,9 @@ int main(int argc, char *argv[])
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);
 	if (fuse_opt_add_arg(&args, argv[0]) ||
-			fuse_opt_add_arg(&args, "-o") ||
-			fuse_opt_add_arg(&args, "allow_other,default_permissions") ||
+			fuse_opt_add_arg(&args, "-oallow_other") ||
+			(cgwfs.opts.def_permissions &&
+			 fuse_opt_add_arg(&args, "-odefault_permissions")) ||
 			fuse_opt_add_arg(&args, fsnameopt.c_str()) ||
 			(cgwfs.opts.kernel_passthrough &&
 			 fuse_opt_add_arg(&args, "-onosuid,nodev")) ||

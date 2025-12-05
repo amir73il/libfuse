@@ -34,6 +34,8 @@ struct fuse_passthrough_opts {
 	bool nocache{false};
 	bool wbcache{false};
 	bool async_flush{true};
+	bool def_permissions{true};
+	bool def_posixacl{false};
 	bool singlethread{false};
 	bool foreground{false};
 	bool clone_fd{true};
@@ -326,6 +328,7 @@ struct fuse_passthrough_operations {
 	int (*forget) (const fuse_path_at &);
 	int (*getattr) (const fuse_path_at &, struct stat *,
 			struct fuse_file_info *);
+	int (*access) (const fuse_path_at &, int);
 	int (*chmod) (const fuse_path_at &, mode_t, struct fuse_file_info *);
 	int (*chown) (const fuse_path_at &, uid_t, gid_t,
 			struct fuse_file_info *);
