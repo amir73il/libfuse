@@ -22,8 +22,41 @@
 #include <optional>
 #include <functional>
 
+#include <cerrno>
+#include <sys/fsuid.h>
 #include <fuse.h>
 #include <fuse_lowlevel.h>
+
+/*
+ * RAII guard that switches effective UID/GID to the request credentials
+ * and restores the daemon's credentials on destruction.
+ */
+struct fuse_cred_guard {
+	uid_t _uid {static_cast<uid_t>(-1)};
+	gid_t _gid {static_cast<gid_t>(-1)};
+
+	fuse_cred_guard() = delete;
+	fuse_cred_guard(const fuse_cred_guard&) = delete;
+	fuse_cred_guard(fuse_cred_guard&&) = delete;
+	fuse_cred_guard& operator=(const fuse_cred_guard&) = delete;
+	fuse_cred_guard& operator=(fuse_cred_guard&&) = delete;
+
+	fuse_cred_guard(uid_t req_uid, gid_t req_gid,
+			uid_t daemon_uid, gid_t daemon_gid) {
+		if (req_uid != daemon_uid)
+			_uid = setfsuid(req_uid);
+		if (req_gid != daemon_gid)
+			_gid = setfsgid(req_gid);
+	}
+	~fuse_cred_guard() {
+		auto savederrno = errno;
+		if (_uid != static_cast<uid_t>(-1))
+			setfsuid(_uid);
+		if (_gid != static_cast<gid_t>(-1))
+			setfsgid(_gid);
+		errno = savederrno;
+	}
+};
 
 struct fuse_passthrough_opts {
 	std::string source;
@@ -194,10 +227,20 @@ struct fuse_path_at {
 	virtual fuse_inode& inode() const { return _inode; }
 	virtual const char *proc_path() const { return _proc_path; }
 
+	/* Wraps an operation in Cred scope to set effective UID/GID */
+	template <typename T, typename... Args>
+	int with_cred(T op, Args... args) const {
+		auto c = fuse_req_ctx(_req);
+		fuse_cred_guard guard(c->uid, c->gid, daemon_uid(), daemon_gid());
+		return op(args...);
+	}
+
 	virtual void print_fd_path(const char *caller) const;
 	virtual bool is_connected() const;
 	virtual bool reconnect() const;
 private:
+	uid_t daemon_uid() const;
+	gid_t daemon_gid() const;
 	fuse_req_t _req;
 	fuse_inode &_inode;
 	std::string _path;
