@@ -371,7 +371,9 @@ static bool should_redirect_folder_id_xattr(const fuse_path_at &at, const string
 {
 	uint64_t folder_id = 0;
 
-	auto ret = getxattr(at.path(), xattr.c_str(), &folder_id, sizeof(folder_id));
+	auto ret = at.with_cred([&](){
+		return getxattr(at.path(), xattr.c_str(), &folder_id, sizeof(folder_id));
+	});
         if (ret == -1) {
 		if (cgwfs.debug() && errno != ENODATA && errno != ENOENT)
 			cerr << "DEBUG: failed to get folder id from xattr '" << xattr
@@ -490,7 +492,9 @@ static int open_redirect_fd(const fuse_path_at &in, fuse_file_info *fi, int flag
 	if (!out.follow())
 		flags &= ~O_NOFOLLOW;
 
-	auto rfd = open(out.path(), flags);
+	auto rfd = out.with_cred([&](){
+		return open(out.path(), flags);
+	});
 	if (rfd >= 0 && cgwfs.debug()) {
 		cerr << "DEBUG: open redirect_fd=" << rfd
 			<< ", fd=" << get_file_fd(fi) << endl;
