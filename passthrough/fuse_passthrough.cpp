@@ -1007,9 +1007,6 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 	if (!fs.opts.kernel_passthrough)
 		return false;
 
-	// If kernel passthrough is enabled, but not for a specific non-dir fd,
-	// use dio, because another open fd of this inode may have already put
-	// the inode in passthrough io mode.
 	// kernel readdir passthrough is not yet supported by upstream kernel
 	// so it is disabled by default.  When enabled, it will disable both
 	// readdir cache and readdirplus.
@@ -1017,6 +1014,13 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 		if (!fs.opts.readdir_passthrough || !fi->passthrough_readdir)
 			return false;
 	} else if (!fi->passthrough_read || !fi->passthrough_write) {
+		// If kernel passthrough is enabled, but not for a specific non-dir fd,
+		// use dio, because another open fd of this inode may have already put
+		// the inode in passthrough io mode.  In that case, fuse requires an
+		// explicit mention of the passthrough backing_id which this fd is
+		// opting-out from along side the FOPEN_DIRECT_IO flag.
+		fi->backing_id = inode.backing_id;
+		fi->keep_cache = false;
 		fi->direct_io = 1;
 		return false;
 	}
