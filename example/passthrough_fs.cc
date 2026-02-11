@@ -109,6 +109,12 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	// Kernel POSIX ACL enforcement implies default_permissions
 	opts.def_posixacl = options.count("posixacl");
 	opts.def_permissions = !options.count("nopermcache") || opts.def_posixacl;
+	// If we rely on lookup/open for POSIX ACL checks on backing path, then
+	// we can rely on passthrough write/trunc to kill privs on backing path
+	// and reduce FUSE protocol GETXATTR chatter without hurting security
+	if (!opts.def_posixacl && opts.kernel_passthrough)
+		opts.def_killpriv = false;
+
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
 	// With --nocache also do not allow keeping open fds
 	if (options.count("nocache")) {

@@ -69,6 +69,7 @@ struct fuse_passthrough_opts {
 	bool async_flush{true};
 	bool def_permissions{true};
 	bool def_posixacl{false};
+	bool def_killpriv{true};
 	bool singlethread{false};
 	bool foreground{false};
 	bool clone_fd{true};

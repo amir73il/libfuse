@@ -1034,10 +1034,12 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 
 	// Check availability of kernel read/write passthrough feature
 	if (fs.opts.kernel_passthrough) {
-		if (conn->capable & FUSE_CAP_PASSTHROUGH)
+		if (conn->capable & FUSE_CAP_PASSTHROUGH) {
 			conn->want |= FUSE_CAP_PASSTHROUGH;
-		else
+		} else {
 			fs.opts.kernel_passthrough = false;
+			fs.opts.def_killpriv = true;
+		}
 	}
 	cout << "INFO: kernel read/write passthrough "
 		<< (fs.opts.kernel_passthrough ? "enabled" : "disabled" ) << endl;
@@ -1054,6 +1056,9 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 
 	if (fs.opts.def_posixacl && conn->capable & FUSE_CAP_POSIX_ACL)
 		conn->want |= FUSE_CAP_POSIX_ACL;
+
+	if (!fs.opts.def_killpriv && conn->capable & FUSE_CAP_HANDLE_KILLPRIV_V2)
+		conn->want |= FUSE_CAP_HANDLE_KILLPRIV_V2;
 
 	if (fs.opts.nosplice) {
 		// FUSE_CAP_SPLICE_READ is enabled in libfuse3 by default,

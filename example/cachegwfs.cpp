@@ -983,6 +983,11 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	// Kernel POSIX ACL enforcement implies default_permissions
 	cgwfs.opts.def_posixacl = options.count("posixacl");
 	cgwfs.opts.def_permissions = !options.count("nopermcache") || cgwfs.opts.def_posixacl;
+	// If we rely on lookup/open for POSIX ACL checks on backing path, then
+	// we can rely on passthrough write/trunc to kill privs on backing path
+	// and reduce FUSE protocol GETXATTR chatter without hurting security
+	if (!cgwfs.opts.def_posixacl && cgwfs.opts.kernel_passthrough)
+		cgwfs.opts.def_killpriv = false;
 
 	if (options.count("max_threads"))
 		cgwfs.opts.max_threads = options["max_threads"].as<int>();
