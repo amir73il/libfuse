@@ -1855,6 +1855,7 @@ static Dir *get_dir(fuse_file_info *fi)
 	return reinterpret_cast<Dir*>(fi->fh);
 }
 
+
 static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 {
 	int fd = at.with_cred(openat, at.dirfd(), at.path(), fi->flags | O_DIRECTORY);
@@ -1880,6 +1881,7 @@ static int do_opendir(const fuse_path_at &at, fuse_file_info *fi)
 	}
 
 	d->offset = 0;
+	d->passthrough_read = fi->passthrough_readdir;
 
 	fi->fh = reinterpret_cast<uint64_t>(d);
 	return 0;
@@ -2042,8 +2044,8 @@ static void pfs_readdir_common(fuse_req_t req, fuse_ino_t ino, size_t size,
 	fuse_fd_path_at at(req, inode, fi);
 	fuse_readdir_at_buf buf { .at = at, .mem = p, .size = size };
 	// Passthrough readdir unless flag was cleared on opendir() or
-	// if the module does not implements the readdir operation.
-	auto res = (fi->passthrough_readdir ? do_readdir : fs.oper.readdir)
+	// if the module does not implement the readdir operation.
+	auto res = (get_dir(fi)->passthrough_read ? do_readdir : fs.oper.readdir)
 		   (at, &buf, fill_dir, offset, fi, flags);
 	// If there's an error, we can only signal it if we haven't stored
 	// any entries yet - otherwise we'd end up with wrong lookup
@@ -2114,6 +2116,8 @@ static int do_create(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 		return -1;
 	}
 
+	fh->passthrough_read = fi->passthrough_read;
+	fh->passthrough_write = fi->passthrough_write;
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	return 0;
 }
@@ -2168,6 +2172,8 @@ static int do_open(const fuse_path_at &in, fuse_file_info *fi)
 		return -1;
 	}
 
+	fh->passthrough_read = fi->passthrough_read;
+	fh->passthrough_write = fi->passthrough_write;
 	fi->fh = reinterpret_cast<uint64_t>(fh);
 	return 0;
 }
@@ -2209,6 +2215,10 @@ static void pfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		return;
 	}
 	file_passthrough_open(req, ino, fi);
+	if (fs.debug())
+		cerr << "DEBUG: pfs_open()"
+			<< ": passthrough_read=" << fi->passthrough_read
+			<< ", passthrough_write=" << fi->passthrough_write << endl;
 	fuse_reply_open(req, fi);
 }
 
@@ -2297,9 +2307,9 @@ static void pfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 	fuse_fd_path_at at(req, inode, fi);
 	fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 	auto pbuf = &buf;
-	// Passthrough read unless the flag was clearen on open() or if module
-	// does not implements the read_buf operation.
-	auto res = (fi->passthrough_read ? do_read_buf : fs.oper.read_buf)
+	// Passthrough read unless the flag was cleared on open() or if module
+	// does not implement the read_buf operation.
+	auto res = (get_file(fi)->passthrough_read ? do_read_buf : fs.next.read_buf)
 		   (at, &pbuf, size, off, fi);
 	if (res == -1)
 		fuse_reply_err(req, errno);
@@ -2328,8 +2338,8 @@ static void pfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf,
 	auto size {fuse_buf_size(in_buf)};
 	fuse_bufvec out_buf = FUSE_BUFVEC_INIT(size);
 	// Passthrough write unless flag was cleared on open() or if module
-	// does not implements the write_buf operation.
-	auto res = (fi->passthrough_write ? do_write_buf : fs.oper.write_buf)
+	// does not implement the write_buf operation.
+	auto res = (get_file(fi)->passthrough_write ? do_write_buf : fs.next.write_buf)
 		   (at, &out_buf, off, fi);
 	if (res == -1)
 		fuse_reply_err(req, errno);

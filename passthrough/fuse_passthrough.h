@@ -314,6 +314,9 @@ struct fuse_file : fuse_states {
 	fuse_file(fuse_module_states &s) : fuse_states(s) {}
 	virtual int get_fd() = 0;
 	virtual ~fuse_file() {}
+
+	bool passthrough_read {false};
+	bool passthrough_write {false};
 };
 
 static inline fuse_file *get_file(fuse_file_info *fi)
