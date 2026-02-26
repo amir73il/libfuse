@@ -414,6 +414,11 @@ static bool should_redirect_once(const fuse_path_at &at)
 	if (!r->read_once_enabled())
 		return false;
 
+	// In create(), path is not empty and we do not need to redirect once
+	// to a file which is only now being created.
+	if (!at.empty())
+		return false;
+
 	struct stat st;
 	if (fstatat(at.dirfd(), at.path(), &st, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
 		return false;
@@ -437,9 +442,6 @@ static bool should_redirect_once(const fuse_path_at &at)
 static enum op redirect_open_op(const fuse_path_at &at, fuse_file_info *fi)
 {
 	enum op op;
-
-	if (should_redirect_once(at))
-		return OP_REDIRECT;
 
 	if (fi->flags & O_CREAT)
 		op = OP_CREATE;
@@ -537,6 +539,8 @@ static int check_safe_fd(fuse_file_info *fi, enum op op)
 static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 {
 	auto redirected = (at.dirfd() == AT_FDCWD && !at.follow());
+	bool need_rfd = cgwfs.redirect_op(OP_COPY) ||
+			cgwfs.redirect()->read_once_enabled();
 	int rfd = -1;
 	bool fail = false;
 
@@ -547,12 +551,10 @@ static int finish_open(const fuse_path_at &at, fuse_file_info *fi, enum op op)
 		// passthrough library in file_passthrough_open().
 		// When kernel passthrough is not supported, we still want to
 		// bypass page cache when redirecting read/write.
-		// In case we are redirecting once due to should_redirect_once(),
-		// the page cache remains valid for following non-redirected open.
 		fi->direct_io = true;
 	} else if (check_safe_fd(fi, op) == -1) {
 		fail = true;
-	} else if (cgwfs.redirect_op(OP_COPY)) {
+	} else if (need_rfd) {
 		// open redirect fd in addition to the bypass fd.
 		// when called from create(), we must not try to create
 		// a file in redirect path, only to open it.
@@ -749,12 +751,39 @@ static int cgwfs_open(const fuse_path_at &in, fuse_file_info *fi)
 	// Do not passthrough to redirected fd
 	if (out.cwd())
 		fi->passthrough_read = fi->passthrough_write = false;
+	else if (should_redirect_once(in))
+		fi->passthrough_read = false;
 
 	auto ret = next_op(open)(out, fi);
 	if (ret)
 		return ret;
 
 	return finish_open(out, fi, op);
+}
+
+static int cgwfs_read_buf(const fuse_path_at &at, struct fuse_bufvec **pbuf,
+			  size_t size, off_t off, fuse_file_info *fi)
+{
+	auto file = get_file(fi);
+	auto fd = file->get_fd();
+	auto rfd = get_file_redirect_fd(fi);
+
+	if (rfd >= 0 && rfd != fd) {
+		// lseek(SEEK_DATA) on redirect fd to trigger the read once without
+		// populating redirect fd page cache and then continue to read from
+		// the non redirected fd.
+		auto res = lseek(rfd, off, SEEK_DATA);
+		if (cgwfs.debug())
+			cerr << "DEBUG: lseek(redirect_fd=" << rfd << ", " << off
+			     << ", SEEK_DATA) = " << res << ": " << strerror(errno) << endl;
+		if (res == -1 && errno != ENXIO)
+			return -errno;
+	}
+
+	// We only wanted to be called once per file, so use library
+	// passthrough from now on
+	file->passthrough_read = true;
+	return next_op(read_buf)(at, pbuf, size, off, fi);
 }
 
 static int cgwfs_release(const fuse_path_at &in, fuse_file_info *fi)
@@ -881,6 +910,7 @@ static void cgwfs_assign_operations(fuse_passthrough_operations &oper)
 	oper.opendir = cgwfs_opendir;
 	oper.create = cgwfs_create;
 	oper.open = cgwfs_open;
+	oper.read_buf = cgwfs_read_buf;
 	oper.release = cgwfs_release;
 	oper.statfs = cgwfs_statfs;
 	oper.setxattr = cgwfs_setxattr;
