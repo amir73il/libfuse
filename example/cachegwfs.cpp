@@ -133,6 +133,7 @@ static const char *op_name(enum op op) {
 struct Redirect {
 	time_t read_once_older {0};
 	time_t read_once_grace {0};
+	vector<string> read_once_xattr;
 	vector<string> read_xattr;
 	vector<string> write_xattr;
 	vector<string> readdir_xattr;
@@ -434,6 +435,15 @@ static bool should_redirect_once(const fuse_path_at &at)
 				<< " older=" << r->read_once_older << ","
 				<< " grace=" << r->read_once_grace << "." << endl;
 		return true;
+	}
+
+	// redirect read once if it has the read once xattr
+	for (const auto& xattr : r->read_once_xattr) {
+		ssize_t res;
+
+		res = getxattr(at.proc_path(), xattr.c_str(), NULL, 0);
+		if (res > 0)
+			return true;
 	}
 
 	return false;
@@ -1147,6 +1157,8 @@ static Redirect *read_config_file()
 			redirect->set_read_once(value, false);
 		} else if (name == "redirect_read_once_grace") {
 			redirect->set_read_once(value, true);
+		} else if (name == "redirect_read_once_xattr") {
+			redirect->read_once_xattr.push_back(value);
 		} else if (name == "redirect_op") {
 			redirect->set_op(value);
 		}
