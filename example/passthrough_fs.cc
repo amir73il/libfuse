@@ -77,7 +77,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		("nosplice", "Do not use splice(2) to transfer data")
 		("nopassthrough", "Do not use kernel pass-through mode for read/write")
 		("nopermcache", "Do not use kernel default permissions mode")
-		("posixacl", "Use kernel default posix acl checks")
+		("noaclcache", "Do not use kernel default posix acl checks")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -106,9 +106,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.nocache = options.count("nocache");
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.kernel_passthrough = !options.count("nopassthrough");
-	// Kernel POSIX ACL enforcement implies default_permissions
-	opts.def_posixacl = options.count("posixacl");
-	opts.def_permissions = !options.count("nopermcache") || opts.def_posixacl;
+	// Kernel POSIX ACL implies default_permissions; only use ACL when using both.
+	opts.def_permissions = !options.count("nopermcache");
+	opts.def_posixacl = !options.count("noaclcache") && opts.def_permissions;
 	// If we rely on lookup/open for POSIX ACL checks on backing path, then
 	// we can rely on passthrough write/trunc to kill privs on backing path
 	// and reduce FUSE protocol GETXATTR chatter without hurting security

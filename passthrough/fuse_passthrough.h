@@ -68,7 +68,7 @@ struct fuse_passthrough_opts {
 	bool wbcache{false};
 	bool async_flush{true};
 	bool def_permissions{true};
-	bool def_posixacl{false};
+	bool def_posixacl{true};
 	bool def_killpriv{true};
 	bool singlethread{false};
 	bool foreground{false};

@@ -1056,6 +1056,12 @@ static void pfs_init(void *userdata, fuse_conn_info *conn)
 	if (conn->capable & FUSE_CAP_FLOCK_LOCKS)
 		conn->want |= FUSE_CAP_FLOCK_LOCKS;
 
+	// Kernel def_posixacl implies default_permissions; with_cred only checks
+	// def_posixacl, so keep them in sync: never use posix acl when not using
+	// default permissions.
+	if (!fs.opts.def_permissions)
+		fs.opts.def_posixacl = false;
+
 	if (fs.opts.def_posixacl && conn->capable & FUSE_CAP_POSIX_ACL)
 		conn->want |= FUSE_CAP_POSIX_ACL;
 

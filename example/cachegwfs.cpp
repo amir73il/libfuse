@@ -982,7 +982,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 		("nopassthrough", "Do not use pass-through mode in kernel for read/write")
 		("readdirpassthrough", "Use pass-through mode in kernel for readdir")
 		("nopermcache", "Do not use kernel default permissions mode")
-		("posixacl", "Use kernel default posix acl checks")
+		("noaclcache", "Do not use kernel default posix acl checks")
 		("max_threads", "Max number of libfuse worker threads", cxxopts::value<int>(), "N")
 		("max_idle_threads", "Max number of idle libfuse worker threads", cxxopts::value<int>(), "N")
 		("single", "Run single-threaded");
@@ -1019,13 +1019,12 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	cgwfs.opts.connected_fd = !cgwfs.opts.keep_fd;
 	cgwfs.opts.kernel_passthrough = !options.count("nopassthrough");
 	cgwfs.opts.readdir_passthrough = options.count("readdirpassthrough");
-	// Kernel POSIX ACL enforcement implies default_permissions
-	cgwfs.opts.def_posixacl = options.count("posixacl");
-	cgwfs.opts.def_permissions = !options.count("nopermcache") || cgwfs.opts.def_posixacl;
-	// If we rely on lookup/open for POSIX ACL checks on backing path, then
-	// we can rely on passthrough write/trunc to kill privs on backing path
+	// Kernel POSIX ACL implies default_permissions; only use ACL when using both.
+	cgwfs.opts.def_permissions = !options.count("nopermcache");
+	cgwfs.opts.def_posixacl = !options.count("noaclcache") && cgwfs.opts.def_permissions;
+	// With kernel passthrough we mount with nosuid, so we can skip kernel kill privs
 	// and reduce FUSE protocol GETXATTR chatter without hurting security
-	if (!cgwfs.opts.def_posixacl && cgwfs.opts.kernel_passthrough)
+	if (cgwfs.opts.kernel_passthrough)
 		cgwfs.opts.def_killpriv = false;
 
 	if (options.count("max_threads"))
