@@ -228,18 +228,32 @@ struct fuse_path_at {
 	virtual fuse_inode& inode() const { return _inode; }
 	virtual const char *proc_path() const { return _proc_path; }
 
-	/* Wraps an operation in Cred scope to set effective UID/GID */
+	/* Wraps an operation in Cred scope to set effective UID/GID when
+	 * !def_posixacl || force. Otherwise runs with daemon creds. */
+	template <typename T, typename... Args>
+	int with_cred_cond(bool force, T op, Args... args) const {
+		if (!def_posixacl() || force) {
+			auto c = fuse_req_ctx(_req);
+			fuse_cred_guard guard(c->uid, c->gid,
+					      daemon_uid(), daemon_gid());
+			return op(args...);
+		}
+		return op(args...);
+	}
 	template <typename T, typename... Args>
 	int with_cred(T op, Args... args) const {
-		auto c = fuse_req_ctx(_req);
-		fuse_cred_guard guard(c->uid, c->gid, daemon_uid(), daemon_gid());
-		return op(args...);
+		return with_cred_cond(false, op, args...);
+	}
+	template <typename T, typename... Args>
+	int with_cred_force(T op, Args... args) const {
+		return with_cred_cond(true, op, args...);
 	}
 
 	virtual void print_fd_path(const char *caller) const;
 	virtual bool is_connected() const;
 	virtual bool reconnect() const;
 private:
+	bool def_posixacl() const;
 	uid_t daemon_uid() const;
 	gid_t daemon_gid() const;
 	fuse_req_t _req;

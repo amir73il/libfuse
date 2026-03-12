@@ -436,6 +436,8 @@ bool Fs::encode(xfs_fh &xfh)
 uid_t fuse_path_at::daemon_uid() const { return fs.uid; }
 gid_t fuse_path_at::daemon_gid() const { return fs.gid; }
 
+bool fuse_path_at::def_posixacl() const { return fs.opts.def_posixacl; }
+
 
 fuse_empty_path_at::fuse_empty_path_at(fuse_req_t req, fuse_inode &inode) :
 	fuse_path_at(req, inode, "")
@@ -1124,13 +1126,13 @@ static int do_chmod(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 	// Convert empty path to magic symlink
 	fuse_path_at_cwd out(in);
 	// AT_SYMLINK_NOFOLLOW not implemented
-	return out.with_cred(fchmodat, out.dirfd(), out.path(), mode, 0);
+	return out.with_cred_force(fchmodat, out.dirfd(), out.path(), mode, 0);
 }
 
 static int do_chown(const fuse_path_at &at, uid_t uid, gid_t gid, fuse_file_info *fi)
 {
 	(void)fi;
-	return at.with_cred(fchownat, at.dirfd(), at.path(), uid, gid, at.flags());
+	return at.with_cred_force(fchownat, at.dirfd(), at.path(), uid, gid, at.flags());
 }
 
 static int do_truncate(const fuse_path_at &in, off_t size, fuse_file_info *fi)
@@ -1156,7 +1158,7 @@ static int do_utimens(const fuse_path_at &in, const struct timespec tv[2],
 #ifdef HAVE_UTIMENSAT
 		// Convert empty path to magic symlink
 		fuse_path_at_cwd out(in);
-		return out.with_cred(utimensat, out.dirfd(), out.path(), tv, out.flags());
+		return out.with_cred_force(utimensat, out.dirfd(), out.path(), tv, out.flags());
 #else
 		errno = EOPNOTSUPP;
 		return -1;
@@ -2552,8 +2554,8 @@ static int do_setxattr(const fuse_path_at &in, const char *name, const char *val
 		errno = EINVAL;
 		return -1;
 	}
-	return out.with_cred(out.follow() ? setxattr : lsetxattr,
-			     out.path(), name, value, size, flags);
+	return out.with_cred_force(out.follow() ? setxattr : lsetxattr,
+				  out.path(), name, value, size, flags);
 }
 
 static void pfs_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
@@ -2577,8 +2579,8 @@ static int do_removexattr(const fuse_path_at &in, const char *name)
 		errno = EINVAL;
 		return -1;
 	}
-	return out.with_cred(out.follow() ? removexattr : lremovexattr,
-			     out.path(), name);
+	return out.with_cred_force(out.follow() ? removexattr : lremovexattr,
+				  out.path(), name);
 }
 
 static void pfs_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name)
