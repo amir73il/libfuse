@@ -928,7 +928,7 @@ static void fuse_reply_errno(fuse_req_t req, int res)
 
 
 /* Called with inode mutex locked */
-static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd)
+static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd, bool is_dir)
 {
 	auto ino = inode.ino();
 
@@ -939,8 +939,12 @@ static int inode_passthrough_open(fuse_req_t req, Inode &inode, int fd)
 		return inode.backing_id;
 	} else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
 		cerr << "DEBUG: fuse_passthrough_open failed for inode " << ino
-			<< ", disabling kernel passthrough." << endl;
-		fs.opts.kernel_passthrough = false;
+			<< ", disabling " << (is_dir ? "readdir" : "kernel")
+			<< " passthrough." << endl;
+		if (is_dir)
+			fs.opts.readdir_passthrough = false;
+		else
+			fs.opts.kernel_passthrough = false;
 		return 0;
 	} else {
 		if (fs.debug())
@@ -967,7 +971,8 @@ static void inode_passthrough_close(fuse_req_t req, Inode &inode)
 	}
 }
 
-static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
+static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi,
+				  bool is_dir = false)
 {
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
@@ -980,7 +985,13 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 	if (!fs.opts.kernel_passthrough)
 		return false;
 
-	if (!fi->passthrough_read || !fi->passthrough_write) {
+	// kernel readdir passthrough is not yet supported by upstream kernel
+	// so it is disabled by default.  When enabled, it will disable both
+	// readdir cache and readdirplus.
+	if (is_dir) {
+		if (!fs.opts.readdir_passthrough || !fi->passthrough_read)
+			return false;
+	} else if (!fi->passthrough_read || !fi->passthrough_write) {
 		// If kernel passthrough is enabled, but not for a specific fd,
 		// use dio, because another open fd of this inode may have put
 		// the inode in passthrough io mode.
@@ -995,15 +1006,18 @@ static bool file_passthrough_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info
 
 	// Setup a shared backing file on first open of an inode
 	auto fd = get_file_fd(fi);
-	auto backing_id = inode_passthrough_open(req, inode, fd);
+	auto backing_id = inode_passthrough_open(req, inode, fd, is_dir);
 	if (!backing_id)
 		return  false;
 
 	// Do not clean cache on open of kernel passthrough fd and
 	// do not call flush on close of kernel passthrough fd
+	// readdir passthrough does not use readdir cache
 	fi->backing_id = backing_id;
 	fi->keep_cache = true;
 	fi->noflush = true;
+	if (is_dir)
+		fi->cache_readdir = false;
 	return true;
 }
 
@@ -1872,6 +1886,7 @@ static void pfs_opendir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		fi->keep_cache = 1;
 		fi->cache_readdir = 1;
 	}
+	file_passthrough_open(req, ino, fi, true);
 	fuse_reply_open(req, fi);
 	return;
 }
@@ -2045,12 +2060,14 @@ static int do_releasedir(const fuse_path_at &, fuse_file_info *fi)
 
 static void pfs_releasedir(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 {
-	InodeRef inode(get_inode(ino));
+	auto inode_ptr = get_inode(ino);
+	InodeRef inode(inode_ptr);
 	if (inode.error(req))
 		return;
 
 	fuse_fd_path_at at(req, inode, fi);
 	call_op(releasedir)(at, fi);
+	file_passthrough_close(req, *inode_ptr, fi);
 	fuse_reply_err(req, 0);
 }
 
