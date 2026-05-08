@@ -167,6 +167,7 @@ struct Fs {
 	dev_t src_dev;
 	bool nosplice;
 	bool nocache;
+	bool wbcache;
 	size_t num_threads;
 	bool clone_fd;
 
@@ -203,11 +204,15 @@ static void sfs_init(void *userdata, fuse_conn_info *conn)
 {
 	(void)userdata;
 
-	if (!fuse_set_feature_flag(conn, FUSE_CAP_PASSTHROUGH))
+	if (fs.passthrough &&
+	    !fuse_set_feature_flag(conn, FUSE_CAP_PASSTHROUGH))
 		fs.passthrough = false;
 
 	/* Passthrough and writeback cache are conflicting modes */
-	if (fs.timeout && !fs.passthrough)
+	if (fs.passthrough)
+		fs.wbcache = false;
+
+	if (fs.wbcache)
 		fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
 
 	fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS);
@@ -1475,6 +1480,7 @@ static cxxopts::ParseResult parse_options(int argc, char **argv)
 		"debug-fuse", "Enable libfuse debug messages")(
 		"foreground", "Run in foreground")("help", "Print help")(
 		"nocache", "Disable attribute all caching")(
+		"wbcache", "Enable writeback cache")(
 		"nosplice", "Do not use splice(2) to transfer data")(
 		"nopassthrough", "Do not use pass-through mode for read/write")(
 		"single", "Run single-threaded")(
@@ -1587,7 +1593,9 @@ int main(int argc, char *argv[])
 	// Initialize filesystem root
 	fs.root.fd = -1;
 	fs.root.nlookup = 9999;
-	fs.timeout = options.count("nocache") ? 0 : 86400.0;
+	fs.nocache = options.count("nocache");
+	fs.wbcache = options.count("wbcache");
+	fs.timeout = fs.nocache ? 0 : 86400.0;
 
 	struct stat stat;
 	auto ret = lstat(fs.source.c_str(), &stat);
