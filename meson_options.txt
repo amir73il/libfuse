@@ -10,6 +10,9 @@ option('initscriptdir', type : 'string', value : '/etc/init.d/',
 option('utils', type : 'boolean', value : true,
        description: 'Whether or not to build and install helper programs')
 
+option('passthrough', type : 'boolean', value : true,
+       description: 'Whether or not to build and install libfuse_passthrough')
+
 option('examples', type : 'boolean', value : true,
        description: 'Whether or not to build example programs')
 
