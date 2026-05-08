@@ -40,6 +40,13 @@ if platform != 'dragonfly' and add_languages('cpp', required : false)
                dependencies: [ thread_dep, libfuse_dep ],
                cpp_args : '-std=c++20',
                install: false)
+if get_option('passthrough')
+    executable('passthrough_fs', 'passthrough_fs.cc',
+               dependencies: [ thread_dep, libfuse_dep ],
+               link_with: libfuse_passthrough,
+               cpp_args : '-std=c++20',
+               install: false)
+endif
 endif
 
 # TODO: Link passthrough_fh with ulockmgr if available
