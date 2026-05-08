@@ -45,6 +45,7 @@ struct fuse_passthrough_opts {
 	bool connected_fd{false};
 	unsigned int max_threads{0};
 	unsigned int max_idle_threads{0};
+	bool kernel_passthrough{true};
 };
 
 struct fuse_passthrough_module;
