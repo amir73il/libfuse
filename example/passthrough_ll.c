@@ -34,6 +34,7 @@
 #define FUSE_USE_VERSION FUSE_MAKE_VERSION(3, 18)
 
 #include <fuse_lowlevel.h>
+#include <fuse_helpers.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -664,12 +665,6 @@ out_err:
 		free(d);
 	}
 	fuse_reply_err(req, error);
-}
-
-static int is_dot_or_dotdot(const char *name)
-{
-	return name[0] == '.' && (name[1] == '\0' ||
-				  (name[1] == '.' && name[2] == '\0'));
 }
 
 static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
