@@ -1006,7 +1006,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv)
 	cgwfs.opts.nosplice = options.count("nosplice");
 	cgwfs.opts.nocache = options.count("nocache");
 	cgwfs.opts.attr_timeout = cgwfs.opts.nocache ? 0 : 1.0;
-	cgwfs.opts.entry_timeout = cgwfs.opts.attr_timeout;
+	cgwfs.opts.negative_timeout = cgwfs.opts.entry_timeout = cgwfs.opts.attr_timeout;
 	cgwfs.opts.wbcache = !cgwfs.opts.nocache && options.count("wbcache");
 	// By default library keeps open fds if file handles are not supported,
 	// but user can request keeping open fds and can forbid keeping open fds,
@@ -1137,6 +1137,8 @@ static Redirect *read_config_file()
 			cgwfs.opts.attr_timeout = stoi(value);
 		} else if (name == "entry_timeout") {
 			cgwfs.opts.entry_timeout = stoi(value);
+		} else if (name == "negative_timeout") {
+			cgwfs.opts.negative_timeout = stoi(value);
 		} else if (name == "redirect_read_xattr") {
 			redirect->read_xattr.push_back(value);
 		} else if (name == "redirect_readdir_xattr") {
