@@ -1441,11 +1441,11 @@ static void pfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 	auto res = call_op(lookup)(at, &e, nullptr);
 	if (!res) {
 		fuse_reply_entry(req, &e);
-	} else if (errno != ENOENT) {
+	} else if (errno != ENOENT || fs.opts.negative_timeout == 0.0) {
 		fuse_reply_fd_err(req, errno);
 	} else {
 		e.attr_timeout = fs.opts.attr_timeout;
-		e.entry_timeout = fs.opts.entry_timeout;
+		e.entry_timeout = fs.opts.negative_timeout;
 		e.ino = e.attr.st_ino = 0;
 		fuse_reply_entry(req, &e);
 	}

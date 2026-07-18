@@ -63,6 +63,7 @@ struct fuse_passthrough_opts {
 	std::string mountpoint;
 	double attr_timeout{0.0};
 	double entry_timeout{0.0};
+	double negative_timeout{0.0};
 	bool nosplice{false};
 	bool nocache{false};
 	bool wbcache{false};
