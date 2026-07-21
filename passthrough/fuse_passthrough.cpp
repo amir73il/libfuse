@@ -775,7 +775,7 @@ struct InodeRef : fuse_inode {
 		int err = 0;
 
 		if (i->dead())
-			err = ENOENT;
+			err = ESTALE;
 		else if (fd < 0)
 			err = -fd;
 
