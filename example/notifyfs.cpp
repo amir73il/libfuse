@@ -798,7 +798,7 @@ static int nfyfs_forget(const fuse_path_at &at)
 	inode.set_state(nfyfs, 0);
 	// delete index state before deleting inode
 	delete idx;
-	return 0;
+	return next_op(forget)(at);
 }
 
 static int nfyfs_chmod(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
