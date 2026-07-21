@@ -316,7 +316,7 @@ struct Inode {
 	xfs_fh src_fh {0};
 	int backing_id {0};
 	uint64_t nopen {0};
-	uint64_t nlookup {0};
+	atomic<uint64_t> nlookup {0};
 	// Allow each module to store/fetch state in inode
 	fuse_module_states module_states;
 	mutex m;
@@ -1331,8 +1331,8 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 	Inode &inode = *inode_ptr;
 	if (found) { // found existing inode
 		auto dead = inode.dead();
-		fs_lock.unlock();
 		if (dead) {
+			fs_lock.unlock();
 			cerr << "WARNING: lookup(): inode " << src_ino
 				<< " raced with forget (try again)." << endl;
 			return ESTALE;
@@ -1340,6 +1340,8 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		if (fs.debug())
 			cerr << "DEBUG: lookup(): inode " << src_ino << " (userspace) already known"
 				<< "; gen = " << xfs_fh.gen << ",fd = " << inode._fd << endl;
+		inode.nlookup++;
+		fs_lock.unlock();
 		lock_guard<mutex> g {inode.m};
 		if (inode.gen() != xfs_fh.gen) {
 			if (fs.debug())
@@ -1364,7 +1366,6 @@ static int __do_lookup(const fuse_path_at &at, const char *name, fuse_entry_para
 		// Maybe update long lived fd if inode was initialized by lookup(".")
 		if (inode._fd == -1 && keep_fd)
 			inode.keepfd(newfd_g);
-		inode.nlookup++;
 	} else { // no existing inode
 		/* This is just here to make Helgrind happy. It violates the
 		   lock ordering requirement (inode.m must be acquired before fs.m),
@@ -1660,10 +1661,7 @@ static void pfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 		return;
 	}
 	e.ino = ino;
-	{
-		lock_guard<mutex> g {inode.i->m};
-		inode.i->nlookup++;
-	}
+	inode.i->nlookup++;
 
 	fuse_reply_entry(req, &e);
 	return;
@@ -1740,17 +1738,22 @@ static void pfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
 	fuse_reply_errno(req, res);
 }
 
-// Called with inode mutex held!
+// Called with inode mutex held - unlocks it after acquiring fs mutex.
 static int do_forget(const fuse_path_at &at)
 {
 	fuse_ino_t ino = at.inode().ino();
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
 
-	auto backing_id = inode.backing_id;
 	int ninodes;
 	{
 		lock_guard<mutex> g_fs {fs.m};
+		// Unlock inode.m after acquiring fs.m (correct lock ordering)
+		inode.m.unlock();
+		// Re-check nlookup: a racing lookup may have incremented it
+		// (under fs.m) before we acquired fs.m
+		if (inode.nlookup)
+			return 0;
 		// Mark dead inode to protect against racing with lookup
 		inode.src_fh.ino = 0;
 		fs.inodes.erase(ino);
@@ -1758,6 +1761,7 @@ static int do_forget(const fuse_path_at &at)
 	}
 
 	// Close the shared backing file on inode evict
+	auto backing_id = inode.backing_id;
 	if (backing_id) {
 		if (fuse_passthrough_close(at.req(), backing_id) < 0) {
 			cerr << "DEBUG: fuse_passthrough_close failed for inode "
@@ -1780,7 +1784,7 @@ static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 	auto inode_ptr = get_inode(ino);
 	Inode &inode = *inode_ptr;
 
-	lock_guard<mutex> g {inode.m};
+	unique_lock<mutex> l {inode.m};
 	if (inode.dead())
 		return;
 
@@ -1795,7 +1799,9 @@ static void forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t n)
 		InodeRef inode_ref(inode_ptr);
 		fuse_path_at at(req, inode_ref, "");
 		call_op(forget)(at);
-		// Careful! inode object is dead after the forget call
+		// do_forget() unlocked inode.m - release unique_lock ownership
+		// to prevent double-unlock on destruction
+		l.release();
 	} else if (fs.debug()) {
 		cerr << "DEBUG: forget: inode " << ino
 			<< " lookup count now " << inode.nlookup << endl;
