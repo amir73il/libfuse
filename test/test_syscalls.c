@@ -94,6 +94,19 @@ static void success(void)
 #define this_test (&tests[testnum-1])
 #define next_test (&tests[testnum])
 
+/*
+ * Expected errnos when operating on an O_PATH fd whose FUSE inode is
+ * stale or has been forgotten by the daemon (e.g. after unlink).
+ */
+#define is_fuse_inode_bad_errno(e) \
+	((e) == ESTALE || (e) == EIO || (e) == ENOENT || (e) == EBADF)
+
+/*
+ * Expected errnos when the FUSE daemon has crashed (abort).
+ */
+#define is_fuse_daemon_dead_errno(e) \
+	((e) == ENOTCONN || (e) == ECONNABORTED)
+
 static void __start_test(const char *fmt, ...)
 {
 	unsigned int n;
@@ -279,8 +292,7 @@ static int fcheck_stat(int fd, int flags, struct stat *st)
 		if (flags & O_PATH) {
 			// With O_PATH fd, the server does not have to keep
 			// the inode alive so FUSE inode may be stale or bad
-			if (errno == ESTALE || errno == EIO ||
-			    errno == ENOENT || errno == EBADF)
+			if (is_fuse_inode_bad_errno(errno))
 				return 0;
 		}
 		PERROR("fstat");
@@ -1998,6 +2010,216 @@ static int do_test_create_ro_dir(int flags, const char *flags_str)
 	return 0;
 }
 
+/*
+ * Stress test for the lookup/forget race in passthrough_hp.
+ *
+ * When forget_one() and do_lookup() concurrently process the same source
+ * inode number (recycled with a new generation), do_lookup may find the
+ * inode in the map and increment nlookup while forget_one is erasing it.
+ * This was fixed by upstream commits:
+ *   1e19235c - fix race between forget_one and do_lookup
+ *   02c0fc62 - fix race in forget_one()
+ *
+ * Scenario: old file is unlinked and a new file recycles the same source
+ * inode number.  Closing the last fd to the old (unlinked) file triggers
+ * an immediate FORGET for the old inode.  A concurrent LOOKUP for the new
+ * file finds the same source ino (different generation) in the FUSE inode
+ * map while FORGET is tearing it down.
+ *
+ * Without the race fix, do_lookup may increment nlookup on an inode that
+ * forget_one has just erased (use-after-free).  This causes either:
+ *   - "INTERNAL ERROR: Negative lookup count" → abort()
+ *   - "INTERNAL ERROR: Unknown inode" → abort()
+ * Both crash the daemon.
+ *
+ * With the fix, nlookup is incremented under fs.m before releasing
+ * the lock, so the race is eliminated entirely.
+ *
+ * Requires -u flag (recent kernel with inode reuse fix) and realdir.
+ */
+#define RACE_FILES 20
+#define RACE_ITERS 50
+
+static int test_lookup_forget_race(void)
+{
+	int i, iter, err = 0;
+	int res;
+	int recycled = 0, total = 0;
+	int path_fds[RACE_FILES];
+	ino_t old_inos[RACE_FILES];
+
+	start_test("lookup_forget_race");
+
+	if (!unlinked_test || realdir_fd < 0) {
+		fprintf(stderr, "%s SKIP\n", testname);
+		return 0;
+	}
+
+	for (iter = 0; iter < RACE_ITERS; iter++) {
+		/*
+		 * Phase 1: Create files in source dir, look them up via mount,
+		 * and hold O_PATH fds so the FUSE inodes stay alive.
+		 */
+		for (i = 0; i < RACE_FILES; i++) {
+			char name[64], mpath[1280];
+			struct stat st;
+			int fd;
+
+			sprintf(name, "racefile.%d", i);
+			sprintf(mpath, "%s/%s", basepath, name);
+
+			fd = openat(realdir_fd, name,
+				    O_CREAT | O_WRONLY | O_TRUNC, 0644);
+			if (fd < 0) {
+				PERROR("creat racefile");
+				err = -1;
+				goto out;
+			}
+			close(fd);
+
+			path_fds[i] = open(mpath, O_PATH);
+			if (path_fds[i] < 0) {
+				if (is_fuse_daemon_dead_errno(errno))
+					goto daemon_crashed;
+				if (is_fuse_inode_bad_errno(errno)) {
+					path_fds[i] = -1;
+					old_inos[i] = 0;
+					continue;
+				}
+				PERROR("open(O_PATH)");
+				err = -1;
+				goto out;
+			}
+			if (fstat(path_fds[i], &st) < 0) {
+				if (is_fuse_daemon_dead_errno(errno))
+					goto daemon_crashed;
+				if (is_fuse_inode_bad_errno(errno)) {
+					close(path_fds[i]);
+					path_fds[i] = -1;
+					old_inos[i] = 0;
+					continue;
+				}
+				PERROR("fstat");
+				close(path_fds[i]);
+				err = -1;
+				goto out;
+			}
+			old_inos[i] = st.st_ino;
+		}
+
+		/*
+		 * Phase 2: Unlink the old files via the mount.  The inodes
+		 * stay alive in the FUSE daemon because the O_PATH fds
+		 * prevent the kernel from sending FORGET.
+		 */
+		for (i = 0; i < RACE_FILES; i++) {
+			char mpath[1280];
+			sprintf(mpath, "%s/racefile.%d", basepath, i);
+			unlink(mpath);
+		}
+
+		/*
+		 * Phase 3: Create new files directly in the source dir.
+		 * The filesystem may recycle the inode numbers that were
+		 * just freed.  Give the filesystem (e.g. XFS) time to
+		 * process the unlinked inode list so inodes are eligible
+		 * for reuse.
+		 */
+		syncfs(realdir_fd);
+		usleep(1000);
+		for (i = 0; i < RACE_FILES; i++) {
+			char name[64];
+			int fd;
+
+			sprintf(name, "racefile.%d", i);
+			fd = openat(realdir_fd, name,
+				    O_CREAT | O_WRONLY | O_TRUNC, 0644);
+			if (fd < 0) {
+				PERROR("creat new racefile");
+				err = -1;
+				goto out;
+			}
+			close(fd);
+		}
+
+		/*
+		 * Phase 4: Close the old O_PATH fds in a burst — each close
+		 * triggers FORGET for the old inode (nlookup drops to 0).
+		 *
+		 * Phase 5: Immediately stat all new files via the mount in a
+		 * burst — each stat triggers LOOKUP.  If a new file recycled
+		 * an old inode number, the LOOKUP and FORGET for the same
+		 * source ino race in the FUSE daemon's thread pool.
+		 *
+		 * Closing all fds first maximises the window: the daemon is
+		 * busy processing N FORGETs when the LOOKUPs start arriving.
+		 */
+		for (i = 0; i < RACE_FILES; i++)
+			if (path_fds[i] >= 0)
+				close(path_fds[i]);
+
+		for (i = 0; i < RACE_FILES; i++) {
+			struct stat st;
+			char mpath[1280];
+
+			/* Skipped in phase 1 (stale inode) */
+			if (path_fds[i] < 0)
+				continue;
+
+			sprintf(mpath, "%s/racefile.%d", basepath, i);
+			res = stat(mpath, &st);
+			if (res < 0) {
+				if (is_fuse_daemon_dead_errno(errno))
+					goto daemon_crashed;
+				/*
+				 * The file exists (created in phase 3).
+				 * Any error here means the race was hit.
+				 */
+				ERROR("racefile.%d iter %d: race hit (%s)",
+				      i, iter, strerror(errno));
+				err = -1;
+				goto out;
+			}
+
+			total++;
+			if (st.st_ino == old_inos[i])
+				recycled++;
+		}
+
+		/* Cleanup for next iteration */
+		for (i = 0; i < RACE_FILES; i++) {
+			char name[64];
+			sprintf(name, "racefile.%d", i);
+			unlinkat(realdir_fd, name, 0);
+		}
+	}
+
+out:
+	/* Final cleanup */
+	for (i = 0; i < RACE_FILES; i++) {
+		char name[64], mpath[1280];
+		sprintf(name, "racefile.%d", i);
+		unlinkat(realdir_fd, name, 0);
+		sprintf(mpath, "%s/racefile.%d", basepath, i);
+		unlink(mpath);
+	}
+
+	if (!err) {
+		fprintf(stderr, "%s recycled %d/%d inodes  ",
+			testname, recycled, total);
+		success();
+	}
+	return err;
+
+daemon_crashed:
+	/*
+	 * The daemon crashed (abort) due to the lookup/forget race.
+	 * This is the expected outcome without the fix.
+	 */
+	ERROR("daemon crashed (lookup/forget race triggered)");
+	return -1;
+}
+
 int main(int argc, char *argv[])
 {
 	int err = 0;
@@ -2005,7 +2227,7 @@ int main(int argc, char *argv[])
 	int is_root;
 
 	umask(0);
-	if (argc < 2 || argc > 4) {
+	if (argc < 2 || argc > 5) {
 		fprintf(stderr, "usage: %s testdir [:realdir] [[-]test#] [-u]\n", argv[0]);
 		return 1;
 	}
@@ -2132,6 +2354,7 @@ int main(int argc, char *argv[])
 	err += test_create_ro_dir(O_CREAT | O_WRONLY);
 	err += test_create_ro_dir(O_CREAT | O_TRUNC);
 	err += test_copy_file_range();
+	err += test_lookup_forget_race();
 
 	unlink(testfile2);
 	unlink(testsock);
