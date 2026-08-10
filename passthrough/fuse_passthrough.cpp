@@ -1661,7 +1661,10 @@ static void pfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 		return;
 	}
 	e.ino = ino;
-	inode.i->nlookup++;
+	{
+		lock_guard<mutex> g {fs.m};
+		inode.i->nlookup++;
+	}
 
 	fuse_reply_entry(req, &e);
 	return;
