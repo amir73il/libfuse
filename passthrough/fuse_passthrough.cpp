@@ -362,6 +362,7 @@ typedef shared_ptr<Inode> InodePtr;
 typedef map<ino_t, InodePtr> InodeMap;
 
 struct Fs : public fuse_passthrough_module {
+	struct fuse_passthrough_opts opts{};
 	// Must be acquired *after* any Inode.m locks.
 	mutex m;
 	InodeMap inodes; // protected by mutex
@@ -2807,11 +2808,17 @@ static void maximize_fd_limit()
 }
 
 
-int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
+struct fuse_passthrough_opts &fuse_passthrough_opts()
+{
+	return fs.opts;
+}
+
+int fuse_passthrough_main(fuse_args *args,
 			  fuse_passthrough_module *modules[], int num_modules,
 			  size_t oper_size)
 {
 	struct fuse_loop_config *loop_config = NULL;
+	auto &opts = fs.opts;
 
 	// We may need an fd for every dentry in our the filesystem that the
 	// kernel knows about. This is way more than most processes need,
@@ -2820,7 +2827,6 @@ int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
 
 	// Initialize filesystem root
 	fs.num_modules = num_modules;
-	fs.opts = opts;
 	fs.init_root();
 
 	if (oper_size != sizeof(fs.oper))
@@ -2879,4 +2885,3 @@ err_out1:
 
 	return ret ? 1 : 0;
 }
-

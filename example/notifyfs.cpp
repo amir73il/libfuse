@@ -1124,9 +1124,8 @@ bool NotifyFs::set_index_path(const string &index_path)
 	return true;
 }
 
-void nfyfs_init(fuse_passthrough_opts &opts, const string &index_path, bool index_all)
+void nfyfs_init(const string &index_path, bool index_all)
 {
-	nfyfs.opts = opts;
 	nfyfs_assign_operations(nfyfs.oper);
 	nfyfs.index_all = index_all;
 	nfyfs.set_index_path(index_path);

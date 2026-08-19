@@ -469,14 +469,15 @@ struct fuse_passthrough_operations {
 };
 
 
+struct fuse_passthrough_opts &fuse_passthrough_opts();
+
 struct fuse_passthrough_module {
 	fuse_passthrough_module(const char *_name) : name(_name) {}
 	virtual ~fuse_passthrough_module() {}
 
-	virtual bool debug() { return opts.debug; }
+	virtual bool debug() { return fuse_passthrough_opts().debug; }
 
         const char *name;
-	fuse_passthrough_opts opts{};
 	fuse_passthrough_operations oper{};
 	fuse_passthrough_operations next{};
 	int idx{0};
@@ -488,7 +489,7 @@ struct fuse_passthrough_module {
 #define call_module_next_op(module, op) \
 	__call_op((module).next.op)
 
-int fuse_passthrough_main(fuse_args *args, fuse_passthrough_opts &opts,
+int fuse_passthrough_main(fuse_args *args,
 			  fuse_passthrough_module *modules[], int num_modules,
 			  size_t oper_size);
 

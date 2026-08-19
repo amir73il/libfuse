@@ -205,6 +205,7 @@ struct Redirect {
 static Redirect *read_config_file();
 
 struct CgwFs : public fuse_passthrough_module {
+	struct fuse_passthrough_opts opts{};
 	string redirect_path;
 	string config_file;
 
@@ -1169,6 +1170,9 @@ static Redirect *read_config_file()
 	if (redirect->test_op(OP_OPEN_RW))
 		redirect->set_op(OP_CREATE);
 
+	// Sync runtime-changeable opts to lib
+	auto &opts = fuse_passthrough_opts();
+	opts.debug = debug;
 	cgwfs.opts.debug = debug;
 
 	return redirect;
@@ -1268,12 +1272,13 @@ int main(int argc, char *argv[])
 		auto index_path = options["index_path"].as<string>();
 		auto index_all = !!options.count("index_all");
 		cout << "notifyfs index is " << index_path << endl;
-		nfyfs_init(cgwfs.opts, index_path, index_all);
+		nfyfs_init(index_path, index_all);
 		nfyfs = nfyfs_module();
 		num_modules++;
 	}
 	fuse_passthrough_module *modules[] = { &cgwfs, nfyfs };
+	fuse_passthrough_opts() = cgwfs.opts;
 
-	return fuse_passthrough_main(&args, cgwfs.opts, &modules[start_module],
+	return fuse_passthrough_main(&args, &modules[start_module],
 				     num_modules, sizeof(cgwfs.oper));
 }

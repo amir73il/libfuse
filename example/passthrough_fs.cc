@@ -65,7 +65,7 @@ static cxxopts::ParseResult parse_wrapper(cxxopts::Options& parser, int& argc, c
 }
 
 
-static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrough_opts &opts) {
+static cxxopts::ParseResult parse_options(int &argc, char **argv, struct fuse_passthrough_opts &opts) {
 	cxxopts::Options opt_parser(argv[0]);
 	opt_parser.add_options()
 		("debug", "Enable filesystem debug messages")
@@ -144,7 +144,7 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 int main(int argc, char *argv[]) {
 
 	// Parse command line options
-	fuse_passthrough_opts opts{};
+	auto &opts = fuse_passthrough_opts();
 	auto options {parse_options(argc, argv, opts)};
 	auto mount_options = "fsname=" + opts.source + ",allow_other";
 
@@ -164,6 +164,6 @@ int main(int argc, char *argv[]) {
 	int num_modules = opts.debug;
 	fuse_passthrough_module *modules[] = { trace_module() };
 
-	return fuse_passthrough_main(&args, opts, modules, num_modules,
+	return fuse_passthrough_main(&args, modules, num_modules,
 				     sizeof(fuse_passthrough_operations));
 }
