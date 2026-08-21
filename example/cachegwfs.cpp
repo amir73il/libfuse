@@ -743,9 +743,20 @@ static int cgwfs_create(const fuse_path_at &in, mode_t mode, fuse_file_info *fi)
 {
 	enum op op = redirect_open_op(in, fi);
 	auto out = get_fd_path_op(in, op);
+
 	// Do not passthrough to redirected fd
-	if (out.cwd())
+	if (out.cwd()) {
 		fi->passthrough_read = fi->passthrough_write = false;
+	} else if (cgwfs.redirect_op(OP_MKNOD)) {
+		// If create is not redirected but mknod should be, create the
+		// file on the redirect path first, then open locally for I/O.
+		auto rout = get_fd_path_op(in, OP_MKNOD);
+		auto ret = next_op(mknod)(rout, S_IFREG | mode, 0);
+		if (ret && (errno != EEXIST || (fi->flags & O_EXCL)))
+			return ret;
+		if (!ret)
+			fi->flags &= ~O_EXCL;
+	}
 
 	auto ret = next_op(create)(out, mode, fi);
 	if (ret)
