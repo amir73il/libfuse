@@ -77,6 +77,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		("nosplice", "Do not use splice(2) to transfer data")
 		("nopassthrough", "Do not use kernel pass-through mode for read/write")
 		("readdirpassthrough", "Use kernel pass-through mode for readdir")
+		("nopermcache", "Do not use kernel default permissions mode")
+		("posixacl", "Use kernel default posix acl checks")
 		("single", "Run single-threaded");
 
 	// FIXME: Find a better way to limit the try clause to just
@@ -106,6 +108,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 	opts.wbcache = !opts.nocache && options.count("wbcache");
 	opts.kernel_passthrough = !options.count("nopassthrough");
 	opts.readdir_passthrough = options.count("readdirpassthrough");
+	// Kernel POSIX ACL enforcement implies default_permissions
+	opts.def_posixacl = options.count("posixacl");
+	opts.def_permissions = !options.count("nopermcache") || opts.def_posixacl;
 	opts.attr_timeout = opts.entry_timeout = opts.nocache ? 0 : 1.0;
 	// With --nocache also do not allow keeping open fds
 	if (options.count("nocache")) {
@@ -137,7 +142,10 @@ int main(int argc, char *argv[]) {
 	// Parse command line options
 	auto &opts = fuse_passthrough_get_opts();
 	auto options {parse_options(argc, argv, opts)};
-	auto mount_options = "fsname=" + opts.source + ",allow_other,default_permissions";
+	auto mount_options = "fsname=" + opts.source + ",allow_other";
+
+	if (opts.def_permissions)
+		mount_options += ",default_permissions";
 
 	// Initialize fuse
 	fuse_args args = FUSE_ARGS_INIT(0, nullptr);

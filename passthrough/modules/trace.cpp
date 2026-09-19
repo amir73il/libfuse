@@ -44,6 +44,12 @@ static int xmp_getattr(const fuse_path_at &at, struct stat *attr,
 	return next_op(getattr)(at, attr, fi);
 }
 
+static int xmp_access(const fuse_path_at &at, int mask)
+{
+	trace_fd_path_at(at);
+	return next_op(access)(at, mask);
+}
+
 static int xmp_chmod(const fuse_path_at &at, mode_t mode, fuse_file_info *fi)
 {
 	trace_fd_path_at(at);
@@ -187,6 +193,7 @@ static void assign_operations(fuse_passthrough_operations &oper)
 	oper.rmdir = xmp_rmdir;
 	oper.rename = xmp_rename;
 	oper.getattr = xmp_getattr;
+	oper.access = xmp_access;
 	oper.chmod = xmp_chmod;
 	oper.chown = xmp_chown;
 	oper.truncate = xmp_truncate;
