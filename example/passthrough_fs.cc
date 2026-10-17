@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <list>
+#include <vector>
 #include "cxxopts.hpp"
 #include <fstream>
 #include <thread>
@@ -79,7 +80,9 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		("readdirpassthrough", "Use kernel pass-through mode for readdir")
 		("nopermcache", "Do not use kernel default permissions mode")
 		("posixacl", "Use kernel default posix acl checks")
-		("single", "Run single-threaded");
+		("single", "Run single-threaded")
+		("o", "Mount options (see mount.fuse(5))",
+		 cxxopts::value<std::vector<std::string>>());
 
 	// FIXME: Find a better way to limit the try clause to just
 	// opt_parser.parse() (cf. https://github.com/jarro2783/cxxopts/issues/146)
@@ -142,7 +145,18 @@ int main(int argc, char *argv[]) {
 	// Parse command line options
 	auto &opts = fuse_passthrough_get_opts();
 	auto options {parse_options(argc, argv, opts)};
-	auto mount_options = "fsname=" + opts.source + ",allow_other";
+	auto mount_options = string("allow_other");
+	bool has_fsname = false;
+
+	if (options.count("o")) {
+		for (auto &opt : options["o"].as<vector<string>>()) {
+			if (opt.rfind("fsname=", 0) == 0)
+				has_fsname = true;
+			mount_options += "," + opt;
+		}
+	}
+	if (!has_fsname)
+		mount_options += ",fsname=" + opts.source;
 
 	if (opts.def_permissions)
 		mount_options += ",default_permissions";
