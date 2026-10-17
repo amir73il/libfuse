@@ -586,7 +586,10 @@ uint32_t Fs::xfs_bulkstat_gen(__u64 ino)
 	if (_bulkstat_fd < 0 ||
 	    ioctl(_bulkstat_fd, XFS_IOC_FSBULKSTAT_SINGLE, &breq) != 0) {
 		auto saverr = errno;
-		cerr << "INFO: failed to bulkstat inode " << ino << ", errno=" << errno << endl;
+		if (debug()) {
+			cerr << "INFO: failed to bulkstat inode " << ino
+				<< ", errno=" << errno << endl;
+		}
 		errno = saverr;
 		// Try open by handle with zero generation
 		return 0;
@@ -634,7 +637,8 @@ retry:
 				     at_connectable);
 	if (ret < 0 && at_connectable) {
 		// Maybe connectable fh not supported - retry with non-connectable
-		cout << "INFO: connectable file handles not supported by kernel" << endl;
+		if (debug())
+			cout << "INFO: connectable file handles not supported by kernel" << endl;
 		at_connectable = 0;
 		goto retry;
 	}
@@ -657,12 +661,16 @@ retry:
 		bulkstat = xfs_bulkstat_gen(src_ino);
 		if (!bulkstat && errno == EPERM) {
 			fs.opts.keep_fd = 1;
-			cout << "INFO: insufficient privileges to decode file handles"
-				<< " - keeping O_PATH fds" << endl;
+			if (debug()) {
+				cout << "INFO: insufficient privileges to decode file handles"
+					<< " - keeping O_PATH fds" << endl;
+			}
 		}
-		cout << "INFO: source filesystem looks like "
-			<< ((bulkstat || !ino32) ? "xfs" : "ext4")
-			<< " -o inode" << (ino32 ? "32" : "64") << endl;
+		if (debug()) {
+			cout << "INFO: source filesystem looks like "
+				<< ((bulkstat || !ino32) ? "xfs" : "ext4")
+				<< " -o inode" << (ino32 ? "32" : "64") << endl;
+		}
 	}
 }
 

@@ -126,7 +126,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		cerr << "realpath(" << argv[1] << ") failed: " << strerror(errno) << endl;
 		exit(1);
 	}
-	cout << "source is " << rp << endl;
+	if (opts.debug)
+		cout << "source is " << rp << endl;
 	opts.source = rp;
 
 	auto mp = realpath(argv[2], NULL);
@@ -134,7 +135,8 @@ static cxxopts::ParseResult parse_options(int &argc, char **argv, fuse_passthrou
 		cerr << "realpath(" << argv[2] << ") failed: " << strerror(errno) << endl;
 		exit(1);
 	}
-	cout << "mount point is " << mp << endl;
+	if (opts.debug)
+		cout << "mount point is " << mp << endl;
 	opts.mountpoint = mp;
 
 	return options;
